@@ -354,6 +354,7 @@ jobs:
               const val ADMIN = 2
               const val MANAGE_REQUESTS = 16
               const val REQUEST_4K = 1024
+              const val REQUEST_ADVANCED = 8192
           }
 
           fun JSONObject.str(key: String): String? =
@@ -449,6 +450,7 @@ jobs:
               val seasonStatus: Map<Int, Int>,
               val requestedSeasons: Set<Int>,
               val hasActiveRequest: Boolean,
+              val isAnime: Boolean,
           ) {
               val isTv get() = mediaType == "tv"
 
@@ -513,6 +515,9 @@ jobs:
                           seasonStatus = seasonStatus,
                           requestedSeasons = requested,
                           hasActiveRequest = activeRequest,
+                          // TMDB keyword 210024 = "anime"; Seerr uses it to pick Sonarr's anime defaults
+                          isAnime = (o.obj("keywords")?.arr("results") ?: o.arr("keywords"))
+                              .mapObjects { it.optInt("id") }.contains(210024),
                       )
                   }
               }
@@ -529,6 +534,7 @@ jobs:
           ) {
               val isAdmin get() = permissions and Permission.ADMIN != 0
               val canManage get() = isAdmin || (permissions and Permission.MANAGE_REQUESTS != 0)
+              val canAdvancedRequest get() = canManage || (permissions and Permission.REQUEST_ADVANCED != 0)
               val role get() = when {
                   isAdmin -> "Admin"
                   canManage -> "Manager"
@@ -599,6 +605,65 @@ jobs:
           )
 
           data class ServerStatus(val version: String, val updateAvailable: Boolean)
+
+          // ---- Radarr / Sonarr destination options ----
+
+          data class ArrServer(
+              val id: Int,
+              val name: String,
+              val is4k: Boolean,
+              val isDefault: Boolean,
+              val activeDirectory: String?,
+              val activeProfileId: Int?,
+              val activeTags: List<Int>,
+              val activeLanguageProfileId: Int?,
+              val activeAnimeDirectory: String?,
+              val activeAnimeProfileId: Int?,
+              val activeAnimeTags: List<Int>,
+              val activeAnimeLanguageProfileId: Int?,
+          ) {
+              companion object {
+                  private fun ints(o: JSONObject, key: String): List<Int> {
+                      val a = o.arr(key)
+                      return (0 until a.length()).map { a.optInt(it) }
+                  }
+                  fun parse(o: JSONObject) = ArrServer(
+                      id = o.optInt("id"),
+                      name = o.str("name") ?: "Server ${o.optInt("id")}",
+                      is4k = o.optBoolean("is4k"),
+                      isDefault = o.optBoolean("isDefault"),
+                      activeDirectory = o.str("activeDirectory"),
+                      activeProfileId = o.intOrNull("activeProfileId"),
+                      activeTags = ints(o, "activeTags"),
+                      activeLanguageProfileId = o.intOrNull("activeLanguageProfileId"),
+                      activeAnimeDirectory = o.str("activeAnimeDirectory"),
+                      activeAnimeProfileId = o.intOrNull("activeAnimeProfileId"),
+                      activeAnimeTags = ints(o, "activeAnimeTags"),
+                      activeAnimeLanguageProfileId = o.intOrNull("activeAnimeLanguageProfileId"),
+                  )
+              }
+          }
+
+          data class NamedId(val id: Int, val name: String)
+
+          data class RootFolder(val path: String, val freeSpace: Long)
+
+          data class ArrOptions(
+              val server: ArrServer,
+              val profiles: List<NamedId>,
+              val rootFolders: List<RootFolder>,
+              val tags: List<NamedId>,
+              val languageProfiles: List<NamedId>,
+          )
+
+          /** Admin overrides sent with a request. */
+          data class RequestOptions(
+              val serverId: Int,
+              val profileId: Int?,
+              val rootFolder: String?,
+              val tags: List<Int>,
+              val languageProfileId: Int?,
+          )
           FEYNOS_EOF
           mkdir -p 'app/src/main/java/com/feynos/seerr/data'
           cat > 'app/src/main/java/com/feynos/seerr/data/Prefs.kt' <<'FEYNOS_EOF'
@@ -764,12 +829,13 @@ jobs:
                   return try { me() } catch (e: Exception) { prefs.apiKey = null; throw e }
               }
 
-              suspend fun me(): User = User.parse(JSONObject(get("/auth/me")))
+              suspend fun me(): User = User.parse(JSONObject(get("/auth/me"))).also { meCache = it }
 
               suspend fun logout() {
                   runCatching { post("/auth/logout") }
                   prefs.clearSession()
                   cache.clear()
+                  meCache = null
               }
 
               // ---- Plex PIN OAuth ----
@@ -836,19 +902,57 @@ jobs:
 
               // ---- Requests ----
 
-              suspend fun requestMovie(tmdbId: Int, is4k: Boolean = false) {
-                  post("/request", JSONObject().put("mediaType", "movie").put("mediaId", tmdbId).put("is4k", is4k))
+              private fun JSONObject.withOptions(o: RequestOptions?): JSONObject {
+                  if (o == null) return this
+                  put("serverId", o.serverId)
+                  o.profileId?.let { put("profileId", it) }
+                  o.rootFolder?.let { put("rootFolder", it) }
+                  put("tags", JSONArray(o.tags))
+                  o.languageProfileId?.let { put("languageProfileId", it) }
+                  return this
+              }
+
+              suspend fun requestMovie(tmdbId: Int, options: RequestOptions? = null, is4k: Boolean = false) {
+                  post(
+                      "/request",
+                      JSONObject().put("mediaType", "movie").put("mediaId", tmdbId).put("is4k", is4k).withOptions(options)
+                  )
                   cache.remove("movie/$tmdbId")
               }
 
-              suspend fun requestTv(tmdbId: Int, seasons: List<Int>, is4k: Boolean = false) {
+              suspend fun requestTv(tmdbId: Int, seasons: List<Int>, options: RequestOptions? = null, is4k: Boolean = false) {
                   post(
                       "/request",
                       JSONObject().put("mediaType", "tv").put("mediaId", tmdbId).put("is4k", is4k)
-                          .put("seasons", JSONArray(seasons))
+                          .put("seasons", JSONArray(seasons)).withOptions(options)
                   )
                   cache.remove("tv/$tmdbId")
               }
+
+              // ---- Radarr / Sonarr ----
+
+              private fun service(mediaType: String) = if (mediaType == "tv") "sonarr" else "radarr"
+
+              suspend fun arrServers(mediaType: String): List<ArrServer> =
+                  JSONArray(get("/service/${service(mediaType)}")).mapObjects { ArrServer.parse(it) }
+
+              suspend fun arrOptions(mediaType: String, serverId: Int): ArrOptions {
+                  val o = JSONObject(get("/service/${service(mediaType)}/$serverId"))
+                  val named = { key: String, label: String ->
+                      o.arr(key).mapObjects { NamedId(it.optInt("id"), it.str(label) ?: it.str("name") ?: "#${it.optInt("id")}") }
+                  }
+                  return ArrOptions(
+                      server = ArrServer.parse(o.obj("server") ?: JSONObject()),
+                      profiles = named("profiles", "name"),
+                      rootFolders = o.arr("rootFolders").mapObjects { RootFolder(it.str("path") ?: return@mapObjects null, it.optLong("freeSpace")) },
+                      tags = named("tags", "label"),
+                      languageProfiles = named("languageProfiles", "name"),
+                  )
+              }
+
+              @Volatile private var meCache: User? = null
+
+              suspend fun meCached(): User = meCache ?: me().also { meCache = it }
 
               data class RequestPage(val items: List<RequestItem>, val total: Int)
 
@@ -1513,6 +1617,7 @@ jobs:
           import com.feynos.seerr.data.Details
           import com.feynos.seerr.data.MediaItem
           import com.feynos.seerr.data.MediaStatus
+          import com.feynos.seerr.data.RequestOptions
           import com.feynos.seerr.data.tmdbImage
           import com.feynos.seerr.ui.components.Badge
           import com.feynos.seerr.ui.components.MediaRow
@@ -1544,7 +1649,8 @@ jobs:
               var error by remember { mutableStateOf<String?>(null) }
               var reload by remember { mutableIntStateOf(0) }
               var requesting by remember { mutableStateOf(false) }
-              var showSeasonSheet by remember { mutableStateOf(false) }
+              var showSheet by remember { mutableStateOf(false) }
+              var canAdvanced by remember { mutableStateOf(false) }
 
               LaunchedEffect(type, id, reload) {
                   error = null
@@ -1555,17 +1661,18 @@ jobs:
                   }
               }
               LaunchedEffect(type, id) { related = api.recommendations(type, id) }
+              LaunchedEffect(Unit) { canAdvanced = runCatching { api.meCached().canAdvancedRequest }.getOrDefault(false) }
 
               fun openUrl(url: String) {
                   runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
               }
 
-              fun doRequest(seasons: List<Int>? = null) {
+              fun doRequest(seasons: List<Int>? = null, options: RequestOptions? = null) {
                   val d = details ?: return
                   requesting = true
                   scope.launch {
                       try {
-                          if (d.isTv) api.requestTv(d.id, seasons ?: emptyList()) else api.requestMovie(d.id)
+                          if (d.isTv) api.requestTv(d.id, seasons ?: emptyList(), options) else api.requestMovie(d.id, options)
                           snackbar.showSnackbar("Requested ${d.title}")
                           reload++
                       } catch (e: Exception) {
@@ -1612,7 +1719,7 @@ jobs:
                               Column(Modifier.padding(horizontal = 20.dp).offset(y = (-56).dp)) {
                                   Actions(
                                       d, requesting,
-                                      onRequest = { if (d.isTv) showSeasonSheet = true else doRequest() },
+                                      onRequest = { if (d.isTv || canAdvanced) showSheet = true else doRequest() },
                                       onPlay = { d.mediaUrl?.let { openUrl(it) } },
                                       onTrailer = { d.trailerUrl?.let { openUrl(it) } },
                                   )
@@ -1702,16 +1809,16 @@ jobs:
                   ) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
 
                   val sd = details
-                  if (showSeasonSheet && sd != null) {
-                      SeasonSheet(sd, onDismiss = { showSeasonSheet = false }) { seasons ->
-                          showSeasonSheet = false
-                          doRequest(seasons)
+                  if (showSheet && sd != null) {
+                      RequestSheet(sd, advanced = canAdvanced, onDismiss = { showSheet = false }) { seasons, options ->
+                          showSheet = false
+                          doRequest(seasons, options)
                       }
                   }
               }
           }
 
-          private fun seasonBadge(d: Details, n: Int) = when {
+          internal fun seasonBadge(d: Details, n: Int) = when {
               d.seasonStatus[n] == MediaStatus.AVAILABLE || d.status == MediaStatus.AVAILABLE -> mediaStatusStyle(MediaStatus.AVAILABLE)
               d.seasonStatus[n] == MediaStatus.PARTIAL -> mediaStatusStyle(MediaStatus.PARTIAL)
               d.seasonStatus[n] == MediaStatus.PROCESSING -> mediaStatusStyle(MediaStatus.PROCESSING)
@@ -1719,7 +1826,7 @@ jobs:
               else -> null
           }
 
-          private fun seasonLocked(d: Details, n: Int) = seasonBadge(d, n) != null &&
+          internal fun seasonLocked(d: Details, n: Int) = seasonBadge(d, n) != null &&
               d.seasonStatus[n] != MediaStatus.PARTIAL
 
           @Composable
@@ -1821,72 +1928,6 @@ jobs:
                               Text("Trailer")
                           }
                       }
-                  }
-              }
-          }
-
-          @OptIn(ExperimentalMaterial3Api::class)
-          @Composable
-          private fun SeasonSheet(d: Details, onDismiss: () -> Unit, onConfirm: (List<Int>) -> Unit) {
-              val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-              val requestable = d.seasons.filter { !seasonLocked(d, it.number) }.map { it.number }
-              val selected = remember { mutableStateListOf<Int>().apply { addAll(requestable) } }
-
-              ModalBottomSheet(onDismissRequest = onDismiss, sheetState = state, containerColor = Surface1) {
-                  Column(Modifier.padding(horizontal = 20.dp).navigationBarsPadding()) {
-                      Text("Request ${d.title}", style = MaterialTheme.typography.titleLarge)
-                      Text("Choose the seasons you'd like", color = TextMuted, style = MaterialTheme.typography.bodyMedium)
-                      Spacer(Modifier.height(12.dp))
-                      Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                          Text("${selected.size} selected", color = TextMuted, modifier = Modifier.weight(1f))
-                          TextButton(onClick = {
-                              if (selected.size == requestable.size) selected.clear()
-                              else { selected.clear(); selected.addAll(requestable) }
-                          }) { Text(if (selected.size == requestable.size) "Clear" else "Select all") }
-                      }
-                      Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
-                          d.seasons.forEach { s ->
-                              val locked = seasonLocked(d, s.number)
-                              val checked = locked || s.number in selected
-                              Row(
-                                  Modifier
-                                      .fillMaxWidth()
-                                      .clip(RoundedCornerShape(12.dp))
-                                      .clickable(enabled = !locked) {
-                                          if (s.number in selected) selected.remove(s.number) else selected.add(s.number)
-                                      }
-                                      .padding(vertical = 6.dp),
-                                  verticalAlignment = Alignment.CenterVertically,
-                              ) {
-                                  Checkbox(
-                                      checked = checked,
-                                      onCheckedChange = null,
-                                      enabled = !locked,
-                                      colors = CheckboxDefaults.colors(checkedColor = Indigo),
-                                  )
-                                  Spacer(Modifier.width(8.dp))
-                                  Column(Modifier.weight(1f)) {
-                                      Text(s.name, style = MaterialTheme.typography.titleSmall)
-                                      Text("${s.episodeCount} episodes", color = TextMuted, style = MaterialTheme.typography.bodySmall)
-                                  }
-                                  seasonBadge(d, s.number)?.let { Badge(it, compact = true) }
-                              }
-                          }
-                      }
-                      Spacer(Modifier.height(12.dp))
-                      Button(
-                          onClick = { onConfirm(selected.sorted()) },
-                          enabled = selected.isNotEmpty(),
-                          colors = ButtonDefaults.buttonColors(containerColor = Indigo),
-                          shape = RoundedCornerShape(12.dp),
-                          modifier = Modifier.fillMaxWidth().height(50.dp),
-                      ) {
-                          Text(
-                              if (selected.isEmpty()) "Select seasons" else "Request ${selected.size} season" + if (selected.size > 1) "s" else "",
-                              fontWeight = FontWeight.Bold,
-                          )
-                      }
-                      Spacer(Modifier.height(16.dp))
                   }
               }
           }
@@ -2709,6 +2750,409 @@ jobs:
                   )
                   if (onClick != null && value == null) Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = TextMuted)
               }
+          }
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/java/com/feynos/seerr/ui/screens'
+          cat > 'app/src/main/java/com/feynos/seerr/ui/screens/RequestSheet.kt' <<'FEYNOS_EOF'
+          package com.feynos.seerr.ui.screens
+
+          import androidx.compose.animation.AnimatedVisibility
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.ExperimentalLayoutApi
+          import androidx.compose.foundation.layout.FlowRow
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.navigationBarsPadding
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.Check
+          import androidx.compose.material.icons.filled.ExpandLess
+          import androidx.compose.material.icons.filled.ExpandMore
+          import androidx.compose.material.icons.filled.Folder
+          import androidx.compose.material.icons.filled.HighQuality
+          import androidx.compose.material.icons.filled.Language
+          import androidx.compose.material.icons.filled.Sell
+          import androidx.compose.material.icons.filled.Storage
+          import androidx.compose.material.icons.filled.Tune
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.ButtonDefaults
+          import androidx.compose.material3.Checkbox
+          import androidx.compose.material3.CheckboxDefaults
+          import androidx.compose.material3.CircularProgressIndicator
+          import androidx.compose.material3.DropdownMenu
+          import androidx.compose.material3.DropdownMenuItem
+          import androidx.compose.material3.ExperimentalMaterial3Api
+          import androidx.compose.material3.FilterChip
+          import androidx.compose.material3.FilterChipDefaults
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.ModalBottomSheet
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TextButton
+          import androidx.compose.material3.rememberModalBottomSheetState
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateListOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import com.feynos.seerr.LocalApi
+          import com.feynos.seerr.data.ArrOptions
+          import com.feynos.seerr.data.ArrServer
+          import com.feynos.seerr.data.Details
+          import com.feynos.seerr.data.RequestOptions
+          import com.feynos.seerr.ui.components.Badge
+          import com.feynos.seerr.ui.theme.Indigo
+          import com.feynos.seerr.ui.theme.Red
+          import com.feynos.seerr.ui.theme.Surface1
+          import com.feynos.seerr.ui.theme.Surface2
+          import com.feynos.seerr.ui.theme.TextMuted
+          import java.util.Locale
+
+          /**
+           * Request sheet: season picker for series, plus (for admins/managers) the
+           * Radarr/Sonarr server, quality profile, root folder, language and tags.
+           */
+          @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+          @Composable
+          fun RequestSheet(
+              d: Details,
+              advanced: Boolean,
+              onDismiss: () -> Unit,
+              onConfirm: (seasons: List<Int>, options: RequestOptions?) -> Unit,
+          ) {
+              val api = LocalApi.current
+              val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+              // Seasons
+              val requestable = d.seasons.filter { !seasonLocked(d, it.number) }.map { it.number }
+              val selected = remember { mutableStateListOf<Int>().apply { addAll(requestable) } }
+
+              // Destination
+              var servers by remember { mutableStateOf<List<ArrServer>?>(null) }
+              var server by remember { mutableStateOf<ArrServer?>(null) }
+              var options by remember { mutableStateOf<ArrOptions?>(null) }
+              var profileId by remember { mutableStateOf<Int?>(null) }
+              var rootFolder by remember { mutableStateOf<String?>(null) }
+              var languageId by remember { mutableStateOf<Int?>(null) }
+              val tags = remember { mutableStateListOf<Int>() }
+              var loadingOptions by remember { mutableStateOf(false) }
+              var optionsError by remember { mutableStateOf<String?>(null) }
+              var showAdvanced by remember { mutableStateOf(true) }
+
+              LaunchedEffect(advanced) {
+                  if (!advanced) return@LaunchedEffect
+                  try {
+                      val list = api.arrServers(d.mediaType).filter { !it.is4k }
+                      servers = list
+                      server = list.firstOrNull { it.isDefault } ?: list.firstOrNull()
+                      if (list.isEmpty()) optionsError = "No ${if (d.isTv) "Sonarr" else "Radarr"} servers are configured"
+                  } catch (e: Exception) {
+                      optionsError = e.message ?: "Couldn't load servers"
+                  }
+              }
+
+              // Load profiles / folders / tags whenever the server changes, then apply Seerr's defaults
+              LaunchedEffect(server?.id) {
+                  val s = server ?: return@LaunchedEffect
+                  loadingOptions = true
+                  optionsError = null
+                  options = null
+                  try {
+                      val o = api.arrOptions(d.mediaType, s.id)
+                      options = o
+                      val anime = d.isTv && d.isAnime
+                      profileId = (if (anime) s.activeAnimeProfileId else null) ?: s.activeProfileId ?: o.profiles.firstOrNull()?.id
+                      rootFolder = (if (anime) s.activeAnimeDirectory else null) ?: s.activeDirectory ?: o.rootFolders.firstOrNull()?.path
+                      languageId = (if (anime) s.activeAnimeLanguageProfileId else null) ?: s.activeLanguageProfileId
+                          ?: o.languageProfiles.firstOrNull()?.id
+                      tags.clear()
+                      val defaults = if (anime && s.activeAnimeTags.isNotEmpty()) s.activeAnimeTags else s.activeTags
+                      tags.addAll(defaults.filter { id -> o.tags.any { it.id == id } })
+                  } catch (e: Exception) {
+                      optionsError = e.message ?: "Couldn't load server options"
+                  } finally {
+                      loadingOptions = false
+                  }
+              }
+
+              ModalBottomSheet(onDismissRequest = onDismiss, sheetState = state, containerColor = Surface1) {
+                  Column(Modifier.navigationBarsPadding()) {
+                      Column(
+                          Modifier
+                              .weight(1f, fill = false)
+                              .verticalScroll(rememberScrollState())
+                              .padding(horizontal = 20.dp),
+                      ) {
+                          Text("Request ${d.title}", style = MaterialTheme.typography.titleLarge)
+                          Text(
+                              if (d.isTv) "Choose the seasons you'd like" else listOfNotNull("Movie", d.year.ifBlank { null }).joinToString(" • "),
+                              color = TextMuted, style = MaterialTheme.typography.bodyMedium,
+                          )
+
+                          if (d.isTv) {
+                              Spacer(Modifier.height(12.dp))
+                              Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                  Text("${selected.size} selected", color = TextMuted, modifier = Modifier.weight(1f))
+                                  TextButton(onClick = {
+                                      if (selected.size == requestable.size) selected.clear()
+                                      else { selected.clear(); selected.addAll(requestable) }
+                                  }) { Text(if (selected.size == requestable.size) "Clear" else "Select all") }
+                              }
+                              d.seasons.forEach { s ->
+                                  val locked = seasonLocked(d, s.number)
+                                  Row(
+                                      Modifier
+                                          .fillMaxWidth()
+                                          .clip(RoundedCornerShape(12.dp))
+                                          .clickable(enabled = !locked) {
+                                              if (s.number in selected) selected.remove(s.number) else selected.add(s.number)
+                                          }
+                                          .padding(vertical = 6.dp),
+                                      verticalAlignment = Alignment.CenterVertically,
+                                  ) {
+                                      Checkbox(
+                                          checked = locked || s.number in selected,
+                                          onCheckedChange = null,
+                                          enabled = !locked,
+                                          colors = CheckboxDefaults.colors(checkedColor = Indigo),
+                                      )
+                                      Spacer(Modifier.width(8.dp))
+                                      Column(Modifier.weight(1f)) {
+                                          Text(s.name, style = MaterialTheme.typography.titleSmall)
+                                          Text("${s.episodeCount} episodes", color = TextMuted, style = MaterialTheme.typography.bodySmall)
+                                      }
+                                      seasonBadge(d, s.number)?.let { Badge(it, compact = true) }
+                                  }
+                              }
+                          }
+
+                          if (advanced) {
+                              Spacer(Modifier.height(16.dp))
+                              Row(
+                                  Modifier
+                                      .fillMaxWidth()
+                                      .clip(RoundedCornerShape(12.dp))
+                                      .clickable { showAdvanced = !showAdvanced }
+                                      .padding(vertical = 8.dp),
+                                  verticalAlignment = Alignment.CenterVertically,
+                              ) {
+                                  Icon(Icons.Filled.Tune, null, tint = Indigo, modifier = Modifier.size(20.dp))
+                                  Spacer(Modifier.width(10.dp))
+                                  Column(Modifier.weight(1f)) {
+                                      Text("Destination", style = MaterialTheme.typography.titleMedium)
+                                      val summary = listOfNotNull(
+                                          server?.name,
+                                          options?.profiles?.firstOrNull { it.id == profileId }?.name,
+                                      ).joinToString(" • ")
+                                      if (summary.isNotBlank()) Text(summary, color = TextMuted, style = MaterialTheme.typography.bodySmall)
+                                  }
+                                  Icon(if (showAdvanced) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, null, tint = TextMuted)
+                              }
+
+                              AnimatedVisibility(showAdvanced) {
+                                  Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 4.dp)) {
+                                      if (optionsError != null) {
+                                          Text(optionsError!!, color = Red, style = MaterialTheme.typography.bodyMedium)
+                                      }
+                                      val list = servers
+                                      if (list != null && list.size > 1) {
+                                          Picker(
+                                              "${if (d.isTv) "Sonarr" else "Radarr"} server", Icons.Filled.Storage,
+                                              list.map { it.id to (it.name + if (it.isDefault) " (default)" else "") },
+                                              server?.id,
+                                          ) { id -> server = list.first { it.id == id } }
+                                      }
+                                      val o = options
+                                      if (o == null && (loadingOptions || (servers == null && optionsError == null))) {
+                                          Row(verticalAlignment = Alignment.CenterVertically) {
+                                              CircularProgressIndicator(Modifier.size(18.dp), color = Indigo, strokeWidth = 2.dp)
+                                              Spacer(Modifier.width(10.dp))
+                                              Text("Loading server options…", color = TextMuted)
+                                          }
+                                      }
+                                      if (o != null) {
+                                          Picker(
+                                              "Quality profile", Icons.Filled.HighQuality,
+                                              o.profiles.map { it.id to it.name }, profileId,
+                                          ) { profileId = it }
+                                          Picker(
+                                              "Root folder", Icons.Filled.Folder,
+                                              o.rootFolders.mapIndexed { i, f -> i to f.path }, o.rootFolders.indexOfFirst { it.path == rootFolder }.takeIf { it >= 0 },
+                                              subtitle = { i -> formatBytes(o.rootFolders[i].freeSpace)?.let { "$it free" } },
+                                          ) { i -> rootFolder = o.rootFolders[i].path }
+                                          if (d.isTv && o.languageProfiles.isNotEmpty()) {
+                                              Picker(
+                                                  "Language profile", Icons.Filled.Language,
+                                                  o.languageProfiles.map { it.id to it.name }, languageId,
+                                              ) { languageId = it }
+                                          }
+                                          Column {
+                                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                                  Icon(Icons.Filled.Sell, null, tint = TextMuted, modifier = Modifier.size(16.dp))
+                                                  Spacer(Modifier.width(6.dp))
+                                                  Text("Tags", color = TextMuted, style = MaterialTheme.typography.labelLarge)
+                                                  if (tags.isNotEmpty()) {
+                                                      Spacer(Modifier.weight(1f))
+                                                      Text("${tags.size} selected", color = TextMuted, style = MaterialTheme.typography.bodySmall)
+                                                  }
+                                              }
+                                              Spacer(Modifier.height(8.dp))
+                                              if (o.tags.isEmpty()) {
+                                                  Text("No tags on this server", color = TextMuted, style = MaterialTheme.typography.bodySmall)
+                                              } else {
+                                                  FlowRow(
+                                                      horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                      verticalArrangement = Arrangement.spacedBy(4.dp),
+                                                  ) {
+                                                      o.tags.forEach { t ->
+                                                          val on = t.id in tags
+                                                          FilterChip(
+                                                              selected = on,
+                                                              onClick = { if (on) tags.remove(t.id) else tags.add(t.id) },
+                                                              label = { Text(t.name) },
+                                                              leadingIcon = if (on) {
+                                                                  { Icon(Icons.Filled.Check, null, Modifier.size(16.dp)) }
+                                                              } else null,
+                                                              shape = RoundedCornerShape(50),
+                                                              colors = FilterChipDefaults.filterChipColors(
+                                                                  selectedContainerColor = Indigo,
+                                                                  selectedLabelColor = Color.White,
+                                                                  selectedLeadingIconColor = Color.White,
+                                                                  containerColor = Surface2,
+                                                                  labelColor = TextMuted,
+                                                              ),
+                                                              border = null,
+                                                          )
+                                                      }
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                          Spacer(Modifier.height(12.dp))
+                      }
+
+                      val s = server
+                      val opts = if (advanced && s != null && options != null) RequestOptions(
+                          serverId = s.id,
+                          profileId = profileId,
+                          rootFolder = rootFolder,
+                          tags = tags.toList(),
+                          languageProfileId = if (d.isTv) languageId else null,
+                      ) else null
+                      val waitingForOptions = advanced && loadingOptions
+                      val canSubmit = (!d.isTv || selected.isNotEmpty()) && !waitingForOptions
+
+                      Button(
+                          onClick = { onConfirm(selected.sorted(), opts) },
+                          enabled = canSubmit,
+                          colors = ButtonDefaults.buttonColors(containerColor = Indigo),
+                          shape = RoundedCornerShape(12.dp),
+                          modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).height(50.dp),
+                      ) {
+                          Text(
+                              when {
+                                  d.isTv && selected.isEmpty() -> "Select seasons"
+                                  d.isTv -> "Request ${selected.size} season" + if (selected.size > 1) "s" else ""
+                                  else -> "Request movie"
+                              },
+                              fontWeight = FontWeight.Bold,
+                          )
+                      }
+                      Spacer(Modifier.height(16.dp))
+                  }
+              }
+          }
+
+          @Composable
+          private fun Picker(
+              label: String,
+              icon: ImageVector,
+              choices: List<Pair<Int, String>>,
+              selected: Int?,
+              subtitle: ((Int) -> String?)? = null,
+              onSelect: (Int) -> Unit,
+          ) {
+              var open by remember { mutableStateOf(false) }
+              val current = choices.firstOrNull { it.first == selected }
+              Box {
+                  Row(
+                      Modifier
+                          .fillMaxWidth()
+                          .clip(RoundedCornerShape(14.dp))
+                          .background(Surface2)
+                          .clickable(enabled = choices.isNotEmpty()) { open = true }
+                          .padding(horizontal = 14.dp, vertical = 10.dp),
+                      verticalAlignment = Alignment.CenterVertically,
+                  ) {
+                      Icon(icon, null, tint = Indigo, modifier = Modifier.size(20.dp))
+                      Spacer(Modifier.width(12.dp))
+                      Column(Modifier.weight(1f)) {
+                          Text(label, color = TextMuted, style = MaterialTheme.typography.labelMedium)
+                          Text(
+                              current?.second ?: if (choices.isEmpty()) "None available" else "Choose…",
+                              style = MaterialTheme.typography.bodyLarge,
+                              maxLines = 1, overflow = TextOverflow.Ellipsis,
+                          )
+                          if (current != null) subtitle?.invoke(current.first)?.let {
+                              Text(it, color = TextMuted, style = MaterialTheme.typography.bodySmall)
+                          }
+                      }
+                      Icon(Icons.Filled.ExpandMore, null, tint = TextMuted)
+                  }
+                  DropdownMenu(
+                      expanded = open,
+                      onDismissRequest = { open = false },
+                  ) {
+                      choices.forEach { (id, name) ->
+                          DropdownMenuItem(
+                              text = {
+                                  Column {
+                                      Text(name, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                      subtitle?.invoke(id)?.let { Text(it, color = TextMuted, style = MaterialTheme.typography.bodySmall) }
+                                  }
+                              },
+                              leadingIcon = {
+                                  if (id == selected) Icon(Icons.Filled.Check, null, tint = Indigo)
+                                  else Spacer(Modifier.size(24.dp))
+                              },
+                              onClick = { open = false; onSelect(id) },
+                          )
+                      }
+                  }
+              }
+          }
+
+          private fun formatBytes(bytes: Long): String? {
+              if (bytes <= 0) return null
+              val units = listOf("B", "KB", "MB", "GB", "TB", "PB")
+              var v = bytes.toDouble()
+              var i = 0
+              while (v >= 1024 && i < units.lastIndex) { v /= 1024; i++ }
+              return String.format(Locale.US, if (v >= 100) "%.0f %s" else "%.1f %s", v, units[i])
           }
           FEYNOS_EOF
           mkdir -p 'app/src/main/java/com/feynos/seerr/ui/screens'
