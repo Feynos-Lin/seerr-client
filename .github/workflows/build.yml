@@ -1,0 +1,3345 @@
+# Feynos Seerr — Android client for Seerr (Overseerr / Jellyseerr).
+# The entire app source lives inside this workflow: it writes the project,
+# builds a signed release APK, and publishes it as a GitHub release.
+name: Build Feynos Seerr
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      VERSION_CODE: ${{ github.run_number }}
+      VERSION_NAME: 1.0.${{ github.run_number }}
+    steps:
+      - name: Generate project
+        run: |
+          mkdir -p project && cd project
+          mkdir -p 'app'
+          cat > 'app/build.gradle.kts' <<'FEYNOS_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+
+          val vCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
+          val vName = System.getenv("VERSION_NAME") ?: "1.0.0"
+          val ksPath = System.getenv("KEYSTORE_PATH")
+
+          android {
+              namespace = "com.feynos.seerr"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.feynos.seerr"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = vCode
+                  versionName = vName
+              }
+
+              signingConfigs {
+                  create("release") {
+                      if (ksPath != null && file(ksPath).exists()) {
+                          storeFile = file(ksPath)
+                          storePassword = System.getenv("KEYSTORE_PASSWORD")
+                          keyAlias = System.getenv("KEY_ALIAS")
+                          keyPassword = System.getenv("KEY_PASSWORD")
+                      }
+                  }
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = true
+                      isShrinkResources = true
+                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+                      signingConfig = signingConfigs.getByName("release")
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+          }
+
+          dependencies {
+              val bom = platform("androidx.compose:compose-bom:2024.10.01")
+              implementation(bom)
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.activity:activity-compose:1.9.3")
+              implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
+              implementation("androidx.navigation:navigation-compose:2.8.3")
+              implementation("androidx.browser:browser:1.8.0")
+              implementation("io.coil-kt:coil-compose:2.7.0")
+              implementation("com.squareup.okhttp3:okhttp:4.12.0")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+          }
+          FEYNOS_EOF
+          mkdir -p 'app'
+          cat > 'app/proguard-rules.pro' <<'FEYNOS_EOF'
+          -dontwarn org.bouncycastle.**
+          -dontwarn org.conscrypt.**
+          -dontwarn org.openjsse.**
+          FEYNOS_EOF
+          mkdir -p 'app/src/main'
+          cat > 'app/src/main/AndroidManifest.xml' <<'FEYNOS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher"
+                  android:label="Feynos Seerr"
+                  android:theme="@style/Theme.FeynosSeerr"
+                  android:networkSecurityConfig="@xml/network_security_config"
+                  android:enableOnBackInvokedCallback="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/java/com/feynos/seerr'
+          cat > 'app/src/main/java/com/feynos/seerr/MainActivity.kt' <<'FEYNOS_EOF'
+          package com.feynos.seerr
+
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.activity.enableEdgeToEdge
+          import androidx.compose.animation.fadeIn
+          import androidx.compose.animation.fadeOut
+          import androidx.compose.animation.slideInHorizontally
+          import androidx.compose.animation.slideOutHorizontally
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.WindowInsets
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.AccountCircle
+          import androidx.compose.material.icons.filled.Explore
+          import androidx.compose.material.icons.filled.Inbox
+          import androidx.compose.material.icons.filled.Search
+          import androidx.compose.material.icons.outlined.AccountCircle
+          import androidx.compose.material.icons.outlined.Explore
+          import androidx.compose.material.icons.outlined.Inbox
+          import androidx.compose.material.icons.outlined.Search
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.NavigationBar
+          import androidx.compose.material3.NavigationBarItem
+          import androidx.compose.material3.NavigationBarItemDefaults
+          import androidx.compose.material3.Scaffold
+          import androidx.compose.material3.SnackbarHost
+          import androidx.compose.material3.SnackbarHostState
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.CompositionLocalProvider
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.staticCompositionLocalOf
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.navigation.NavGraph.Companion.findStartDestination
+          import androidx.navigation.NavHostController
+          import androidx.navigation.NavType
+          import androidx.navigation.compose.NavHost
+          import androidx.navigation.compose.composable
+          import androidx.navigation.compose.currentBackStackEntryAsState
+          import androidx.navigation.compose.rememberNavController
+          import androidx.navigation.navArgument
+          import coil.Coil
+          import coil.ImageLoader
+          import com.feynos.seerr.data.Category
+          import com.feynos.seerr.data.Prefs
+          import com.feynos.seerr.data.SeerrApi
+          import com.feynos.seerr.ui.screens.CategoryScreen
+          import com.feynos.seerr.ui.screens.DetailsScreen
+          import com.feynos.seerr.ui.screens.DiscoverScreen
+          import com.feynos.seerr.ui.screens.LoginScreen
+          import com.feynos.seerr.ui.screens.ProfileScreen
+          import com.feynos.seerr.ui.screens.RequestsScreen
+          import com.feynos.seerr.ui.screens.SearchScreen
+          import com.feynos.seerr.ui.theme.Indigo
+          import com.feynos.seerr.ui.theme.Night
+          import com.feynos.seerr.ui.theme.Surface1
+          import com.feynos.seerr.ui.theme.TextMuted
+          import com.feynos.seerr.ui.theme.SeerrTheme
+
+          val LocalApi = staticCompositionLocalOf<SeerrApi> { error("no api") }
+          val LocalSnackbar = staticCompositionLocalOf<SnackbarHostState> { error("no snackbar") }
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  enableEdgeToEdge()
+                  val api = SeerrApi(Prefs(applicationContext))
+                  Coil.setImageLoader(
+                      ImageLoader.Builder(applicationContext)
+                          .okHttpClient(api.client)
+                          .crossfade(true)
+                          .build()
+                  )
+                  setContent {
+                      SeerrTheme {
+                          val snackbar = remember { SnackbarHostState() }
+                          CompositionLocalProvider(LocalApi provides api, LocalSnackbar provides snackbar) {
+                              SeerrApp(api, snackbar)
+                          }
+                      }
+                  }
+              }
+          }
+
+          private data class Tab(val route: String, val label: String, val icon: ImageVector, val selectedIcon: ImageVector)
+
+          private val tabs = listOf(
+              Tab("discover", "Discover", Icons.Outlined.Explore, Icons.Filled.Explore),
+              Tab("search", "Search", Icons.Outlined.Search, Icons.Filled.Search),
+              Tab("requests", "Requests", Icons.Outlined.Inbox, Icons.Filled.Inbox),
+              Tab("profile", "Profile", Icons.Outlined.AccountCircle, Icons.Filled.AccountCircle),
+          )
+
+          fun NavHostController.openMedia(type: String, id: Int) = navigate("details/$type/$id")
+
+          @Composable
+          fun SeerrApp(api: SeerrApi, snackbar: SnackbarHostState) {
+              val nav = rememberNavController()
+              val backStack by nav.currentBackStackEntryAsState()
+              val route = backStack?.destination?.route
+              val showBar = tabs.any { it.route == route }
+
+              Scaffold(
+                  containerColor = Night,
+                  contentWindowInsets = WindowInsets(0),
+                  snackbarHost = { SnackbarHost(snackbar) },
+                  bottomBar = {
+                      if (showBar) {
+                          NavigationBar(containerColor = Surface1) {
+                              tabs.forEach { tab ->
+                                  val selected = route == tab.route
+                                  NavigationBarItem(
+                                      selected = selected,
+                                      onClick = {
+                                          nav.navigate(tab.route) {
+                                              popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                                              launchSingleTop = true
+                                              restoreState = true
+                                          }
+                                      },
+                                      icon = { Icon(if (selected) tab.selectedIcon else tab.icon, tab.label) },
+                                      label = { Text(tab.label) },
+                                      colors = NavigationBarItemDefaults.colors(
+                                          selectedIconColor = Indigo,
+                                          selectedTextColor = Indigo,
+                                          indicatorColor = Indigo.copy(alpha = 0.15f),
+                                          unselectedIconColor = TextMuted,
+                                          unselectedTextColor = TextMuted,
+                                      ),
+                                  )
+                              }
+                          }
+                      }
+                  },
+              ) { padding ->
+                  Box(Modifier.fillMaxSize().padding(padding)) {
+                      NavHost(
+                          navController = nav,
+                          startDestination = if (api.prefs.isLoggedIn) "discover" else "login",
+                          enterTransition = { fadeIn() },
+                          exitTransition = { fadeOut() },
+                      ) {
+                          composable("login") {
+                              LoginScreen(onLoggedIn = {
+                                  nav.navigate("discover") { popUpTo("login") { inclusive = true } }
+                              })
+                          }
+                          composable("discover") {
+                              DiscoverScreen(
+                                  onOpen = { nav.openMedia(it.mediaType, it.id) },
+                                  onCategory = { nav.navigate("category/${it.name}") },
+                                  onSessionExpired = { nav.toLogin() },
+                              )
+                          }
+                          composable("search") { SearchScreen(onOpen = { nav.openMedia(it.mediaType, it.id) }) }
+                          composable("requests") { RequestsScreen(onOpen = { t, id -> nav.openMedia(t, id) }) }
+                          composable("profile") { ProfileScreen(onLoggedOut = { nav.toLogin() }) }
+                          composable(
+                              "details/{type}/{id}",
+                              arguments = listOf(
+                                  navArgument("type") { type = NavType.StringType },
+                                  navArgument("id") { type = NavType.IntType },
+                              ),
+                              enterTransition = { slideInHorizontally { it / 3 } + fadeIn() },
+                              popExitTransition = { slideOutHorizontally { it / 3 } + fadeOut() },
+                          ) { entry ->
+                              DetailsScreen(
+                                  type = entry.arguments?.getString("type") ?: "movie",
+                                  id = entry.arguments?.getInt("id") ?: 0,
+                                  onBack = { nav.popBackStack() },
+                                  onOpen = { nav.openMedia(it.mediaType, it.id) },
+                              )
+                          }
+                          composable("category/{key}") { entry ->
+                              val cat = runCatching { Category.valueOf(entry.arguments?.getString("key") ?: "") }
+                                  .getOrDefault(Category.TRENDING)
+                              CategoryScreen(cat, onBack = { nav.popBackStack() }, onOpen = { nav.openMedia(it.mediaType, it.id) })
+                          }
+                      }
+                  }
+              }
+          }
+
+          private fun NavHostController.toLogin() {
+              navigate("login") { popUpTo(0) { inclusive = true } }
+          }
+
+          object BuildConfigInfo {
+              fun versionName(context: android.content.Context): String = runCatching {
+                  context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
+              }.getOrDefault("?")
+          }
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/java/com/feynos/seerr/data'
+          cat > 'app/src/main/java/com/feynos/seerr/data/Models.kt' <<'FEYNOS_EOF'
+          package com.feynos.seerr.data
+
+          import org.json.JSONArray
+          import org.json.JSONObject
+
+          // Media status (mediaInfo.status)
+          object MediaStatus {
+              const val UNKNOWN = 1
+              const val PENDING = 2
+              const val PROCESSING = 3
+              const val PARTIAL = 4
+              const val AVAILABLE = 5
+              const val DELETED = 6
+          }
+
+          // Request status
+          object RequestStatus {
+              const val PENDING = 1
+              const val APPROVED = 2
+              const val DECLINED = 3
+              const val FAILED = 4
+              const val COMPLETED = 5
+          }
+
+          object Permission {
+              const val ADMIN = 2
+              const val MANAGE_REQUESTS = 16
+              const val REQUEST_4K = 1024
+          }
+
+          fun JSONObject.str(key: String): String? =
+              if (has(key) && !isNull(key)) optString(key).takeIf { it.isNotEmpty() } else null
+
+          fun JSONObject.obj(key: String): JSONObject? =
+              if (has(key) && !isNull(key)) optJSONObject(key) else null
+
+          fun JSONObject.arr(key: String): JSONArray =
+              if (has(key) && !isNull(key)) optJSONArray(key) ?: JSONArray() else JSONArray()
+
+          fun JSONObject.intOrNull(key: String): Int? =
+              if (has(key) && !isNull(key)) optInt(key) else null
+
+          inline fun JSONArray.forEachObject(block: (JSONObject) -> Unit) {
+              for (i in 0 until length()) optJSONObject(i)?.let(block)
+          }
+
+          inline fun <T> JSONArray.mapObjects(block: (JSONObject) -> T?): List<T> {
+              val out = ArrayList<T>(length())
+              for (i in 0 until length()) {
+                  val o = optJSONObject(i) ?: continue
+                  block(o)?.let { out.add(it) }
+              }
+              return out
+          }
+
+          fun tmdbImage(path: String?, size: String = "w500"): String? =
+              path?.let { "https://image.tmdb.org/t/p/$size$it" }
+
+          data class MediaItem(
+              val id: Int,
+              val mediaType: String,
+              val title: String,
+              val posterPath: String?,
+              val backdropPath: String?,
+              val overview: String,
+              val year: String,
+              val rating: Double,
+              val status: Int,
+          ) {
+              companion object {
+                  fun parse(o: JSONObject, fallbackType: String? = null): MediaItem? {
+                      val type = o.str("mediaType") ?: fallbackType ?: return null
+                      if (type != "movie" && type != "tv") return null
+                      val date = o.str("releaseDate") ?: o.str("firstAirDate") ?: ""
+                      return MediaItem(
+                          id = o.optInt("id"),
+                          mediaType = type,
+                          title = o.str("title") ?: o.str("name") ?: "Untitled",
+                          posterPath = o.str("posterPath"),
+                          backdropPath = o.str("backdropPath"),
+                          overview = o.str("overview") ?: "",
+                          year = date.take(4),
+                          rating = o.optDouble("voteAverage", 0.0).let { if (it.isNaN()) 0.0 else it },
+                          status = o.obj("mediaInfo")?.optInt("status", 0) ?: 0,
+                      )
+                  }
+              }
+          }
+
+          data class Page(val items: List<MediaItem>, val page: Int, val totalPages: Int)
+
+          data class CastMember(val id: Int, val name: String, val character: String, val profilePath: String?)
+
+          data class Season(
+              val number: Int,
+              val name: String,
+              val episodeCount: Int,
+              val posterPath: String?,
+              val airYear: String,
+          )
+
+          data class Details(
+              val id: Int,
+              val mediaType: String,
+              val title: String,
+              val tagline: String?,
+              val overview: String,
+              val posterPath: String?,
+              val backdropPath: String?,
+              val year: String,
+              val runtime: Int?,
+              val rating: Double,
+              val genres: List<String>,
+              val cast: List<CastMember>,
+              val seasons: List<Season>,
+              val status: Int,
+              val status4k: Int,
+              val trailerUrl: String?,
+              val mediaUrl: String?,
+              val studio: String?,
+              val seasonStatus: Map<Int, Int>,
+              val requestedSeasons: Set<Int>,
+              val hasActiveRequest: Boolean,
+          ) {
+              val isTv get() = mediaType == "tv"
+
+              companion object {
+                  fun parse(o: JSONObject, type: String): Details {
+                      val info = o.obj("mediaInfo")
+                      val seasonStatus = HashMap<Int, Int>()
+                      val requested = HashSet<Int>()
+                      var activeRequest = false
+                      if (info != null) {
+                          info.arr("seasons").forEachObject { s ->
+                              seasonStatus[s.optInt("seasonNumber")] = s.optInt("status")
+                          }
+                          info.arr("requests").forEachObject { r ->
+                              val st = r.optInt("status")
+                              if (st == RequestStatus.PENDING || st == RequestStatus.APPROVED) {
+                                  if (!r.optBoolean("is4k")) activeRequest = true
+                                  r.arr("seasons").forEachObject { s -> requested.add(s.optInt("seasonNumber")) }
+                              }
+                          }
+                      }
+                      val trailer = o.arr("relatedVideos").mapObjects { v ->
+                              if (v.str("type") == "Trailer" && v.str("site") == "YouTube") v.str("url")
+                                  ?: v.str("key")?.let { "https://www.youtube.com/watch?v=$it" } else null
+                          }.firstOrNull()
+                      val runtime = o.intOrNull("runtime")
+                          ?: o.arr("episodeRunTime").let { if (it.length() > 0) it.optInt(0) else null }
+                      val date = o.str("releaseDate") ?: o.str("firstAirDate") ?: ""
+                      val studio = if (type == "tv") o.arr("networks").mapObjects { it.str("name") }.firstOrNull()
+                      else o.arr("productionCompanies").mapObjects { it.str("name") }.firstOrNull()
+
+                      return Details(
+                          id = o.optInt("id"),
+                          mediaType = type,
+                          title = o.str("title") ?: o.str("name") ?: "Untitled",
+                          tagline = o.str("tagline"),
+                          overview = o.str("overview") ?: "",
+                          posterPath = o.str("posterPath"),
+                          backdropPath = o.str("backdropPath"),
+                          year = date.take(4),
+                          runtime = runtime?.takeIf { it > 0 },
+                          rating = o.optDouble("voteAverage", 0.0).let { if (it.isNaN()) 0.0 else it },
+                          genres = o.arr("genres").mapObjects { it.str("name") },
+                          cast = (o.obj("credits")?.arr("cast") ?: JSONArray()).mapObjects {
+                              CastMember(it.optInt("id"), it.str("name") ?: "", it.str("character") ?: "", it.str("profilePath"))
+                          }.take(20),
+                          seasons = o.arr("seasons").mapObjects {
+                              val n = it.optInt("seasonNumber")
+                              if (n <= 0) null else Season(
+                                  n,
+                                  it.str("name") ?: "Season $n",
+                                  it.optInt("episodeCount"),
+                                  it.str("posterPath"),
+                                  (it.str("airDate") ?: "").take(4),
+                              )
+                          },
+                          status = info?.optInt("status", 0) ?: 0,
+                          status4k = info?.optInt("status4k", 0) ?: 0,
+                          trailerUrl = trailer,
+                          mediaUrl = info?.str("mediaUrl") ?: info?.str("plexUrl") ?: info?.str("jellyfinMediaUrl"),
+                          studio = studio,
+                          seasonStatus = seasonStatus,
+                          requestedSeasons = requested,
+                          hasActiveRequest = activeRequest,
+                      )
+                  }
+              }
+          }
+
+          data class User(
+              val id: Int,
+              val displayName: String,
+              val email: String,
+              val avatar: String?,
+              val permissions: Int,
+              val userType: Int,
+              val createdAt: String?,
+          ) {
+              val isAdmin get() = permissions and Permission.ADMIN != 0
+              val canManage get() = isAdmin || (permissions and Permission.MANAGE_REQUESTS != 0)
+              val role get() = when {
+                  isAdmin -> "Admin"
+                  canManage -> "Manager"
+                  else -> "User"
+              }
+              val accountType get() = when (userType) {
+                  1 -> "Plex"
+                  2 -> "Local"
+                  3, 4 -> "Jellyfin / Emby"
+                  else -> "Seerr"
+              }
+
+              companion object {
+                  fun parse(o: JSONObject) = User(
+                      id = o.optInt("id"),
+                      displayName = o.str("displayName") ?: o.str("username") ?: o.str("plexUsername")
+                          ?: o.str("jellyfinUsername") ?: o.str("email") ?: "User",
+                      email = o.str("email") ?: "",
+                      avatar = o.str("avatar"),
+                      permissions = o.optInt("permissions"),
+                      userType = o.optInt("userType"),
+                      createdAt = o.str("createdAt"),
+                  )
+              }
+          }
+
+          data class RequestItem(
+              val id: Int,
+              val status: Int,
+              val type: String,
+              val is4k: Boolean,
+              val createdAt: String?,
+              val tmdbId: Int,
+              val mediaStatus: Int,
+              val requestedBy: String,
+              val requestedByAvatar: String?,
+              val requestedById: Int,
+              val seasons: List<Int>,
+          ) {
+              companion object {
+                  fun parse(o: JSONObject): RequestItem? {
+                      val media = o.obj("media") ?: return null
+                      val by = o.obj("requestedBy")
+                      return RequestItem(
+                          id = o.optInt("id"),
+                          status = o.optInt("status"),
+                          type = o.str("type") ?: media.str("mediaType") ?: "movie",
+                          is4k = o.optBoolean("is4k"),
+                          createdAt = o.str("createdAt"),
+                          tmdbId = media.optInt("tmdbId"),
+                          mediaStatus = if (o.optBoolean("is4k")) media.optInt("status4k") else media.optInt("status"),
+                          requestedBy = by?.let { User.parse(it).displayName } ?: "Unknown",
+                          requestedByAvatar = by?.str("avatar"),
+                          requestedById = by?.optInt("id") ?: 0,
+                          seasons = o.arr("seasons").mapObjects { it.optInt("seasonNumber") },
+                      )
+                  }
+              }
+          }
+
+          data class RequestCounts(
+              val total: Int,
+              val pending: Int,
+              val approved: Int,
+              val processing: Int,
+              val available: Int,
+              val declined: Int,
+          )
+
+          data class ServerStatus(val version: String, val updateAvailable: Boolean)
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/java/com/feynos/seerr/data'
+          cat > 'app/src/main/java/com/feynos/seerr/data/Prefs.kt' <<'FEYNOS_EOF'
+          package com.feynos.seerr.data
+
+          import android.content.Context
+          import java.util.UUID
+
+          class Prefs(context: Context) {
+              private val sp = context.getSharedPreferences("seerr", Context.MODE_PRIVATE)
+
+              var server: String
+                  get() = sp.getString("server", "") ?: ""
+                  set(v) = sp.edit().putString("server", v).apply()
+
+              var cookie: String?
+                  get() = sp.getString("cookie", null)
+                  set(v) = sp.edit().putString("cookie", v).apply()
+
+              var apiKey: String?
+                  get() = sp.getString("apiKey", null)
+                  set(v) = sp.edit().putString("apiKey", v).apply()
+
+              var lastMethod: String
+                  get() = sp.getString("method", "local") ?: "local"
+                  set(v) = sp.edit().putString("method", v).apply()
+
+              val clientId: String
+                  get() {
+                      val existing = sp.getString("clientId", null)
+                      if (existing != null) return existing
+                      val id = UUID.randomUUID().toString()
+                      sp.edit().putString("clientId", id).apply()
+                      return id
+                  }
+
+              val isLoggedIn: Boolean
+                  get() = server.isNotBlank() && (cookie != null || apiKey != null)
+
+              fun clearSession() {
+                  sp.edit().remove("cookie").remove("apiKey").apply()
+              }
+          }
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/java/com/feynos/seerr/data'
+          cat > 'app/src/main/java/com/feynos/seerr/data/SeerrApi.kt' <<'FEYNOS_EOF'
+          package com.feynos.seerr.data
+
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+          import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+          import okhttp3.MediaType.Companion.toMediaType
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import okhttp3.RequestBody.Companion.toRequestBody
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.net.URLEncoder
+          import java.util.concurrent.ConcurrentHashMap
+          import java.util.concurrent.TimeUnit
+
+          class ApiException(val code: Int, message: String) : Exception(message)
+
+          class SeerrApi(val prefs: Prefs) {
+
+              private val json = "application/json; charset=utf-8".toMediaType()
+
+              val client: OkHttpClient = OkHttpClient.Builder()
+                  .connectTimeout(15, TimeUnit.SECONDS)
+                  .readTimeout(30, TimeUnit.SECONDS)
+                  .addInterceptor { chain ->
+                      val req = chain.request()
+                      val serverHost = prefs.server.toHttpUrlOrNull()?.host
+                      val b = req.newBuilder()
+                      if (serverHost != null && req.url.host == serverHost) {
+                          prefs.apiKey?.let { b.header("X-Api-Key", it) }
+                          prefs.cookie?.let { b.header("Cookie", it) }
+                      }
+                      val resp = chain.proceed(b.build())
+                      if (serverHost != null && req.url.host == serverHost) {
+                          resp.headers("Set-Cookie").firstOrNull { it.startsWith("connect.sid=") }?.let {
+                              prefs.cookie = it.substringBefore(";")
+                          }
+                      }
+                      resp
+                  }
+                  .build()
+
+              val base: String get() = prefs.server.trimEnd('/')
+
+              fun absoluteUrl(path: String?): String? = when {
+                  path.isNullOrBlank() -> null
+                  path.startsWith("http") -> path
+                  path.startsWith("/") -> base + path
+                  else -> "$base/$path"
+              }
+
+              private fun exec(req: Request): String {
+                  client.newCall(req).execute().use { r ->
+                      val body = r.body?.string() ?: ""
+                      if (!r.isSuccessful) {
+                          val msg = runCatching { JSONObject(body).optString("message") }.getOrNull()
+                              ?.takeIf { it.isNotBlank() }
+                              ?: when (r.code) {
+                                  401 -> "Not signed in or invalid credentials"
+                                  403 -> "You don't have permission to do that"
+                                  404 -> "Not found"
+                                  else -> "Server error (${r.code})"
+                              }
+                          throw ApiException(r.code, msg)
+                      }
+                      return body
+                  }
+              }
+
+              private fun url(path: String) = "$base/api/v1$path"
+
+              suspend fun get(path: String): String = withContext(Dispatchers.IO) {
+                  exec(Request.Builder().url(url(path)).header("Accept", "application/json").get().build())
+              }
+
+              suspend fun post(path: String, body: JSONObject? = null): String = withContext(Dispatchers.IO) {
+                  exec(
+                      Request.Builder().url(url(path)).header("Accept", "application/json")
+                          .post((body?.toString() ?: "{}").toRequestBody(json)).build()
+                  )
+              }
+
+              suspend fun delete(path: String): String = withContext(Dispatchers.IO) {
+                  exec(Request.Builder().url(url(path)).delete().build())
+              }
+
+              private fun enc(s: String) = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+
+              // ---- Auth ----
+
+              suspend fun status(): ServerStatus {
+                  val o = JSONObject(get("/status"))
+                  return ServerStatus(o.optString("version", "?"), o.optBoolean("updateAvailable"))
+              }
+
+              suspend fun loginLocal(email: String, password: String): User {
+                  prefs.apiKey = null; prefs.cookie = null
+                  post("/auth/local", JSONObject().put("email", email).put("password", password))
+                  return me()
+              }
+
+              suspend fun loginJellyfin(username: String, password: String): User {
+                  prefs.apiKey = null; prefs.cookie = null
+                  post("/auth/jellyfin", JSONObject().put("username", username).put("password", password))
+                  return me()
+              }
+
+              suspend fun loginPlex(authToken: String): User {
+                  prefs.apiKey = null; prefs.cookie = null
+                  post("/auth/plex", JSONObject().put("authToken", authToken))
+                  return me()
+              }
+
+              suspend fun loginApiKey(key: String): User {
+                  prefs.cookie = null
+                  prefs.apiKey = key
+                  return try { me() } catch (e: Exception) { prefs.apiKey = null; throw e }
+              }
+
+              suspend fun me(): User = User.parse(JSONObject(get("/auth/me")))
+
+              suspend fun logout() {
+                  runCatching { post("/auth/logout") }
+                  prefs.clearSession()
+                  cache.clear()
+              }
+
+              // ---- Plex PIN OAuth ----
+
+              data class PlexPin(val id: Long, val code: String)
+
+              private fun plexReq(url: String) = Request.Builder().url(url)
+                  .header("Accept", "application/json")
+                  .header("X-Plex-Product", "Feynos Seerr")
+                  .header("X-Plex-Client-Identifier", prefs.clientId)
+                  .header("X-Plex-Device", "Android")
+                  .header("X-Plex-Platform", "Android")
+
+              suspend fun createPlexPin(): PlexPin = withContext(Dispatchers.IO) {
+                  val o = JSONObject(exec(plexReq("https://plex.tv/api/v2/pins?strong=true").post("".toRequestBody(null)).build()))
+                  PlexPin(o.getLong("id"), o.getString("code"))
+              }
+
+              fun plexAuthUrl(pin: PlexPin): String =
+                  "https://app.plex.tv/auth#?clientID=${enc(prefs.clientId)}&code=${enc(pin.code)}" +
+                      "&context%5Bdevice%5D%5Bproduct%5D=${enc("Feynos Seerr")}"
+
+              suspend fun checkPlexPin(pin: PlexPin): String? = withContext(Dispatchers.IO) {
+                  val o = JSONObject(exec(plexReq("https://plex.tv/api/v2/pins/${pin.id}").get().build()))
+                  o.str("authToken")
+              }
+
+              // ---- Discover / search ----
+
+              private fun parsePage(s: String, fallbackType: String? = null): Page {
+                  val o = JSONObject(s)
+                  return Page(
+                      o.arr("results").mapObjects { MediaItem.parse(it, fallbackType) },
+                      o.optInt("page", 1),
+                      o.optInt("totalPages", 1),
+                  )
+              }
+
+              suspend fun discover(category: Category, page: Int = 1): Page =
+                  parsePage(get("${category.path}?page=$page&language=en"), category.fallbackType)
+
+              suspend fun search(query: String, page: Int = 1): Page =
+                  parsePage(get("/search?query=${enc(query)}&page=$page&language=en"))
+
+              private val cache = ConcurrentHashMap<String, Details>()
+
+              fun cachedDetails(type: String, id: Int): Details? = cache["$type/$id"]
+
+              suspend fun details(type: String, id: Int, force: Boolean = false): Details {
+                  val key = "$type/$id"
+                  if (!force) cache[key]?.let { return it }
+                  val d = Details.parse(JSONObject(get("/$type/$id?language=en")), type)
+                  cache[key] = d
+                  return d
+              }
+
+              suspend fun recommendations(type: String, id: Int): List<MediaItem> =
+                  runCatching { parsePage(get("/$type/$id/recommendations?page=1&language=en"), type).items }
+                      .getOrDefault(emptyList())
+                      .ifEmpty {
+                          runCatching { parsePage(get("/$type/$id/similar?page=1&language=en"), type).items }
+                              .getOrDefault(emptyList())
+                      }
+
+              // ---- Requests ----
+
+              suspend fun requestMovie(tmdbId: Int, is4k: Boolean = false) {
+                  post("/request", JSONObject().put("mediaType", "movie").put("mediaId", tmdbId).put("is4k", is4k))
+                  cache.remove("movie/$tmdbId")
+              }
+
+              suspend fun requestTv(tmdbId: Int, seasons: List<Int>, is4k: Boolean = false) {
+                  post(
+                      "/request",
+                      JSONObject().put("mediaType", "tv").put("mediaId", tmdbId).put("is4k", is4k)
+                          .put("seasons", JSONArray(seasons))
+                  )
+                  cache.remove("tv/$tmdbId")
+              }
+
+              data class RequestPage(val items: List<RequestItem>, val total: Int)
+
+              suspend fun requests(filter: String, skip: Int, take: Int = 20, userId: Int? = null): RequestPage {
+                  val path = if (userId != null) "/user/$userId/requests?take=$take&skip=$skip"
+                  else "/request?take=$take&skip=$skip&filter=$filter&sort=added"
+                  val o = JSONObject(get(path))
+                  return RequestPage(
+                      o.arr("results").mapObjects { RequestItem.parse(it) },
+                      o.obj("pageInfo")?.optInt("results") ?: 0,
+                  )
+              }
+
+              suspend fun approve(id: Int) { post("/request/$id/approve") }
+              suspend fun decline(id: Int) { post("/request/$id/decline") }
+              suspend fun deleteRequest(id: Int) { delete("/request/$id") }
+
+              suspend fun requestCounts(): RequestCounts {
+                  val o = JSONObject(get("/request/count"))
+                  return RequestCounts(
+                      o.optInt("total"), o.optInt("pending"), o.optInt("approved"),
+                      o.optInt("processing"), o.optInt("available"), o.optInt("declined"),
+                  )
+              }
+
+              suspend fun userRequestTotal(userId: Int): Int =
+                  JSONObject(get("/user/$userId/requests?take=1&skip=0")).obj("pageInfo")?.optInt("results") ?: 0
+          }
+
+          enum class Category(val title: String, val path: String, val fallbackType: String?) {
+              TRENDING("Trending", "/discover/trending", null),
+              POPULAR_MOVIES("Popular Movies", "/discover/movies", "movie"),
+              POPULAR_TV("Popular Series", "/discover/tv", "tv"),
+              UPCOMING_MOVIES("Upcoming Movies", "/discover/movies/upcoming", "movie"),
+              UPCOMING_TV("Upcoming Series", "/discover/tv/upcoming", "tv"),
+          }
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/java/com/feynos/seerr/ui/components'
+          cat > 'app/src/main/java/com/feynos/seerr/ui/components/Components.kt' <<'FEYNOS_EOF'
+          package com.feynos.seerr.ui.components
+
+          import androidx.compose.animation.core.RepeatMode
+          import androidx.compose.animation.core.animateFloat
+          import androidx.compose.animation.core.infiniteRepeatable
+          import androidx.compose.animation.core.rememberInfiniteTransition
+          import androidx.compose.animation.core.tween
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.PaddingValues
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.aspectRatio
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.lazy.LazyRow
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+          import androidx.compose.material.icons.filled.CheckCircle
+          import androidx.compose.material.icons.filled.CloudOff
+          import androidx.compose.material.icons.filled.Schedule
+          import androidx.compose.material.icons.filled.Star
+          import androidx.compose.material.icons.filled.Sync
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TextButton
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.getValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.Dp
+          import androidx.compose.ui.unit.dp
+          import coil.compose.AsyncImage
+          import com.feynos.seerr.data.MediaItem
+          import com.feynos.seerr.data.MediaStatus
+          import com.feynos.seerr.data.RequestStatus
+          import com.feynos.seerr.data.tmdbImage
+          import com.feynos.seerr.ui.theme.Blue
+          import com.feynos.seerr.ui.theme.Green
+          import com.feynos.seerr.ui.theme.Indigo
+          import com.feynos.seerr.ui.theme.Purple
+          import com.feynos.seerr.ui.theme.Red
+          import com.feynos.seerr.ui.theme.Surface2
+          import com.feynos.seerr.ui.theme.Surface3
+          import com.feynos.seerr.ui.theme.TextMuted
+          import com.feynos.seerr.ui.theme.Yellow
+          import java.time.Duration
+          import java.time.Instant
+
+          data class BadgeStyle(val label: String, val color: Color, val icon: ImageVector)
+
+          fun mediaStatusStyle(status: Int): BadgeStyle? = when (status) {
+              MediaStatus.AVAILABLE -> BadgeStyle("Available", Green, Icons.Filled.CheckCircle)
+              MediaStatus.PARTIAL -> BadgeStyle("Partially Available", Green, Icons.Filled.CheckCircle)
+              MediaStatus.PROCESSING -> BadgeStyle("Processing", Blue, Icons.Filled.Sync)
+              MediaStatus.PENDING -> BadgeStyle("Pending", Yellow, Icons.Filled.Schedule)
+              else -> null
+          }
+
+          fun requestStatusStyle(status: Int, mediaStatus: Int): BadgeStyle = when (status) {
+              RequestStatus.PENDING -> BadgeStyle("Pending", Yellow, Icons.Filled.Schedule)
+              RequestStatus.DECLINED -> BadgeStyle("Declined", Red, Icons.Filled.CloudOff)
+              RequestStatus.FAILED -> BadgeStyle("Failed", Red, Icons.Filled.CloudOff)
+              else -> when (mediaStatus) {
+                  MediaStatus.AVAILABLE -> BadgeStyle("Available", Green, Icons.Filled.CheckCircle)
+                  MediaStatus.PARTIAL -> BadgeStyle("Partially Available", Green, Icons.Filled.CheckCircle)
+                  MediaStatus.PROCESSING -> BadgeStyle("Processing", Blue, Icons.Filled.Sync)
+                  else -> BadgeStyle(if (status == RequestStatus.COMPLETED) "Completed" else "Approved", Indigo, Icons.Filled.CheckCircle)
+              }
+          }
+
+          @Composable
+          fun Badge(style: BadgeStyle, modifier: Modifier = Modifier, compact: Boolean = false) {
+              Row(
+                  modifier
+                      .clip(RoundedCornerShape(50))
+                      .background(style.color.copy(alpha = 0.18f))
+                      .padding(horizontal = if (compact) 6.dp else 10.dp, vertical = if (compact) 3.dp else 5.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+              ) {
+                  Icon(style.icon, null, tint = style.color, modifier = Modifier.size(if (compact) 11.dp else 14.dp))
+                  if (!compact) {
+                      Spacer(Modifier.width(5.dp))
+                      Text(style.label, color = style.color, style = MaterialTheme.typography.labelMedium)
+                  }
+              }
+          }
+
+          @Composable
+          fun TypePill(type: String, modifier: Modifier = Modifier) {
+              val isTv = type == "tv"
+              Text(
+                  if (isTv) "SERIES" else "MOVIE",
+                  modifier
+                      .clip(RoundedCornerShape(6.dp))
+                      .background(if (isTv) Purple.copy(alpha = 0.85f) else Indigo.copy(alpha = 0.85f))
+                      .padding(horizontal = 6.dp, vertical = 2.dp),
+                  color = Color.White,
+                  style = MaterialTheme.typography.labelSmall,
+              )
+          }
+
+          @Composable
+          fun shimmerBrush(): Brush {
+              val t = rememberInfiniteTransition(label = "shimmer")
+              val x by t.animateFloat(0f, 1000f, infiniteRepeatable(tween(1100), RepeatMode.Restart), label = "x")
+              return Brush.linearGradient(
+                  listOf(Surface2, Surface3, Surface2),
+                  start = androidx.compose.ui.geometry.Offset(x - 300f, 0f),
+                  end = androidx.compose.ui.geometry.Offset(x, 300f),
+              )
+          }
+
+          @Composable
+          fun ShimmerBox(modifier: Modifier) {
+              Box(modifier.background(shimmerBrush()))
+          }
+
+          @Composable
+          fun PosterCard(
+              item: MediaItem,
+              onClick: () -> Unit,
+              modifier: Modifier = Modifier,
+              width: Dp? = 120.dp,
+          ) {
+              Column(modifier.then(if (width != null) Modifier.width(width) else Modifier.fillMaxWidth())) {
+                  Box(
+                      Modifier
+                          .fillMaxWidth()
+                          .aspectRatio(2f / 3f)
+                          .clip(RoundedCornerShape(12.dp))
+                          .background(Surface2)
+                          .clickable(onClick = onClick)
+                  ) {
+                      if (item.posterPath != null) {
+                          AsyncImage(
+                              model = tmdbImage(item.posterPath, "w342"),
+                              contentDescription = item.title,
+                              contentScale = ContentScale.Crop,
+                              modifier = Modifier.fillMaxSize(),
+                          )
+                      } else {
+                          Text(
+                              item.title,
+                              Modifier.align(Alignment.Center).padding(8.dp),
+                              textAlign = TextAlign.Center,
+                              style = MaterialTheme.typography.titleSmall,
+                          )
+                      }
+                      TypePill(item.mediaType, Modifier.align(Alignment.TopStart).padding(6.dp))
+                      mediaStatusStyle(item.status)?.let {
+                          Badge(it, Modifier.align(Alignment.TopEnd).padding(6.dp).background(Color.Black.copy(alpha = 0.4f), CircleShape), compact = true)
+                      }
+                      if (item.rating > 0) {
+                          Row(
+                              Modifier
+                                  .align(Alignment.BottomStart)
+                                  .padding(6.dp)
+                                  .clip(RoundedCornerShape(6.dp))
+                                  .background(Color.Black.copy(alpha = 0.6f))
+                                  .padding(horizontal = 5.dp, vertical = 2.dp),
+                              verticalAlignment = Alignment.CenterVertically,
+                          ) {
+                              Icon(Icons.Filled.Star, null, tint = Yellow, modifier = Modifier.size(11.dp))
+                              Spacer(Modifier.width(2.dp))
+                              Text("%.1f".format(item.rating), style = MaterialTheme.typography.labelSmall, color = Color.White)
+                          }
+                      }
+                  }
+                  Spacer(Modifier.height(6.dp))
+                  Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
+                  if (item.year.isNotBlank()) {
+                      Text(item.year, style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                  }
+              }
+          }
+
+          @Composable
+          fun SectionHeader(title: String, onSeeAll: (() -> Unit)? = null) {
+              Row(
+                  Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 20.dp, bottom = 8.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+              ) {
+                  Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                  if (onSeeAll != null) {
+                      TextButton(onClick = onSeeAll) {
+                          Text("See all")
+                          Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null)
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun MediaRow(
+              title: String,
+              items: List<MediaItem>?,
+              onItem: (MediaItem) -> Unit,
+              onSeeAll: (() -> Unit)? = null,
+          ) {
+              if (items != null && items.isEmpty()) return
+              SectionHeader(title, onSeeAll)
+              LazyRow(
+                  contentPadding = PaddingValues(horizontal = 16.dp),
+                  horizontalArrangement = Arrangement.spacedBy(12.dp),
+              ) {
+                  if (items == null) {
+                      items(6) {
+                          Column {
+                              ShimmerBox(Modifier.width(120.dp).aspectRatio(2f / 3f).clip(RoundedCornerShape(12.dp)))
+                              Spacer(Modifier.height(6.dp))
+                              ShimmerBox(Modifier.width(90.dp).height(12.dp).clip(RoundedCornerShape(4.dp)))
+                          }
+                      }
+                  } else {
+                      items(items, key = { "${it.mediaType}-${it.id}" }) { item ->
+                          PosterCard(item, onClick = { onItem(item) })
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun MessageState(
+              icon: ImageVector,
+              title: String,
+              message: String? = null,
+              actionLabel: String? = null,
+              onAction: (() -> Unit)? = null,
+              modifier: Modifier = Modifier,
+          ) {
+              Column(
+                  modifier.fillMaxWidth().padding(32.dp),
+                  horizontalAlignment = Alignment.CenterHorizontally,
+                  verticalArrangement = Arrangement.Center,
+              ) {
+                  Box(
+                      Modifier.size(72.dp).clip(CircleShape).background(Surface2),
+                      contentAlignment = Alignment.Center,
+                  ) { Icon(icon, null, tint = Indigo, modifier = Modifier.size(36.dp)) }
+                  Spacer(Modifier.height(16.dp))
+                  Text(title, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+                  if (message != null) {
+                      Spacer(Modifier.height(6.dp))
+                      Text(message, color = TextMuted, textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyMedium)
+                  }
+                  if (actionLabel != null && onAction != null) {
+                      Spacer(Modifier.height(16.dp))
+                      Button(onClick = onAction) { Text(actionLabel) }
+                  }
+              }
+          }
+
+          @Composable
+          fun Avatar(url: String?, name: String, size: Dp, modifier: Modifier = Modifier) {
+              Box(
+                  modifier.size(size).clip(CircleShape).background(com.feynos.seerr.ui.theme.BrandGradient),
+                  contentAlignment = Alignment.Center,
+              ) {
+                  Text(
+                      name.firstOrNull()?.uppercase() ?: "?",
+                      color = Color.White,
+                      fontWeight = FontWeight.Bold,
+                      style = if (size > 48.dp) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleSmall,
+                  )
+                  if (url != null) {
+                      AsyncImage(url, name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                  }
+              }
+          }
+
+          fun relativeTime(iso: String?): String {
+              if (iso == null) return ""
+              return runCatching {
+                  val d = Duration.between(Instant.parse(iso), Instant.now())
+                  when {
+                      d.toMinutes() < 1 -> "just now"
+                      d.toMinutes() < 60 -> "${d.toMinutes()}m ago"
+                      d.toHours() < 24 -> "${d.toHours()}h ago"
+                      d.toDays() < 30 -> "${d.toDays()}d ago"
+                      d.toDays() < 365 -> "${d.toDays() / 30}mo ago"
+                      else -> "${d.toDays() / 365}y ago"
+                  }
+              }.getOrDefault("")
+          }
+
+          fun formatRuntime(min: Int?): String? = min?.let { if (it >= 60) "${it / 60}h ${it % 60}m" else "${it}m" }
+
+          @Composable
+          fun Modifier.clickableNoRipple(onClick: () -> Unit): Modifier = this.clickable(
+              interactionSource = androidx.compose.runtime.remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+              indication = null,
+              onClick = onClick,
+          )
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/java/com/feynos/seerr/ui/screens'
+          cat > 'app/src/main/java/com/feynos/seerr/ui/screens/BrowseScreens.kt' <<'FEYNOS_EOF'
+          package com.feynos.seerr.ui.screens
+
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.PaddingValues
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.aspectRatio
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.navigationBarsPadding
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.statusBarsPadding
+          import androidx.compose.foundation.lazy.grid.GridCells
+          import androidx.compose.foundation.lazy.grid.GridItemSpan
+          import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+          import androidx.compose.foundation.lazy.grid.items
+          import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.automirrored.filled.ArrowBack
+          import androidx.compose.material.icons.filled.Close
+          import androidx.compose.material.icons.filled.CloudOff
+          import androidx.compose.material.icons.filled.Search
+          import androidx.compose.material.icons.filled.SearchOff
+          import androidx.compose.material3.CircularProgressIndicator
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.IconButton
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TextField
+          import androidx.compose.material3.TextFieldDefaults
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.derivedStateOf
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableIntStateOf
+          import androidx.compose.runtime.mutableStateListOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.saveable.rememberSaveable
+          import androidx.compose.runtime.setValue
+          import androidx.compose.runtime.snapshotFlow
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.platform.LocalFocusManager
+          import androidx.compose.ui.unit.dp
+          import com.feynos.seerr.LocalApi
+          import com.feynos.seerr.data.Category
+          import com.feynos.seerr.data.MediaItem
+          import com.feynos.seerr.data.Page
+          import com.feynos.seerr.ui.components.MessageState
+          import com.feynos.seerr.ui.components.PosterCard
+          import com.feynos.seerr.ui.components.ShimmerBox
+          import com.feynos.seerr.ui.theme.Indigo
+          import com.feynos.seerr.ui.theme.Surface2
+          import com.feynos.seerr.ui.theme.TextMuted
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.flow.distinctUntilChanged
+          import kotlinx.coroutines.flow.filter
+
+          /** Infinite-scrolling poster grid over a paged loader. */
+          @Composable
+          fun PagedGrid(
+              key: Any,
+              loader: suspend (page: Int) -> Page,
+              onOpen: (MediaItem) -> Unit,
+              header: (@Composable () -> Unit)? = null,
+              emptyTitle: String = "Nothing here",
+          ) {
+              val items = remember(key) { mutableStateListOf<MediaItem>() }
+              var page by remember(key) { mutableIntStateOf(0) }
+              var totalPages by remember(key) { mutableIntStateOf(1) }
+              var loading by remember(key) { mutableStateOf(false) }
+              var error by remember(key) { mutableStateOf<String?>(null) }
+              var retry by remember(key) { mutableIntStateOf(0) }
+              val state = rememberLazyGridState()
+
+              suspend fun next() {
+                  if (loading || page >= totalPages) return
+                  loading = true
+                  error = null
+                  try {
+                      val p = loader(page + 1)
+                      val seen = items.map { "${it.mediaType}-${it.id}" }.toHashSet()
+                      items.addAll(p.items.filter { seen.add("${it.mediaType}-${it.id}") })
+                      page = p.page
+                      totalPages = p.totalPages
+                  } catch (e: Exception) {
+                      error = e.message ?: "Something went wrong"
+                  } finally {
+                      loading = false
+                  }
+              }
+
+              LaunchedEffect(key, retry) { if (items.isEmpty()) next() }
+
+              val nearEnd by remember(key) {
+                  derivedStateOf {
+                      val last = state.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                      last >= state.layoutInfo.totalItemsCount - 6
+                  }
+              }
+              LaunchedEffect(key) {
+                  snapshotFlow { nearEnd }.distinctUntilChanged().filter { it }.collect { next() }
+              }
+
+              LazyVerticalGrid(
+                  columns = GridCells.Adaptive(110.dp),
+                  state = state,
+                  contentPadding = PaddingValues(16.dp),
+                  horizontalArrangement = Arrangement.spacedBy(12.dp),
+                  verticalArrangement = Arrangement.spacedBy(16.dp),
+                  modifier = Modifier.fillMaxSize(),
+              ) {
+                  if (header != null) item(span = { GridItemSpan(maxLineSpan) }) { header() }
+                  items(items, key = { "${it.mediaType}-${it.id}" }) { item ->
+                      PosterCard(item, onClick = { onOpen(item) }, width = null)
+                  }
+                  if (items.isEmpty() && loading) {
+                      items(12) {
+                          ShimmerBox(Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(12.dp)))
+                      }
+                  }
+                  if (items.isEmpty() && !loading && error == null) {
+                      item(span = { GridItemSpan(maxLineSpan) }) {
+                          MessageState(Icons.Filled.SearchOff, emptyTitle)
+                      }
+                  }
+                  if (error != null) {
+                      item(span = { GridItemSpan(maxLineSpan) }) {
+                          MessageState(Icons.Filled.CloudOff, "Couldn't load", error, "Retry", { retry++ })
+                      }
+                  }
+                  if (items.isNotEmpty() && loading) {
+                      item(span = { GridItemSpan(maxLineSpan) }) {
+                          Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                              CircularProgressIndicator(color = Indigo)
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun CategoryScreen(category: Category, onBack: () -> Unit, onOpen: (MediaItem) -> Unit) {
+              val api = LocalApi.current
+              Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+                  Row(Modifier.fillMaxWidth().padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                      IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+                      Text(category.title, style = MaterialTheme.typography.titleLarge)
+                  }
+                  PagedGrid(category, { api.discover(category, it) }, onOpen)
+              }
+          }
+
+          @Composable
+          fun SearchScreen(onOpen: (MediaItem) -> Unit) {
+              val api = LocalApi.current
+              val focus = LocalFocusManager.current
+              var query by rememberSaveable { mutableStateOf("") }
+              var debounced by rememberSaveable { mutableStateOf("") }
+
+              LaunchedEffect(query) {
+                  delay(400)
+                  debounced = query.trim()
+              }
+
+              Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                  Text(
+                      "Search",
+                      style = MaterialTheme.typography.headlineMedium,
+                      modifier = Modifier.padding(start = 20.dp, top = 16.dp, bottom = 8.dp),
+                  )
+                  TextField(
+                      value = query,
+                      onValueChange = { query = it },
+                      placeholder = { Text("Movies, shows…", color = TextMuted) },
+                      leadingIcon = { Icon(Icons.Filled.Search, null, tint = TextMuted) },
+                      trailingIcon = {
+                          if (query.isNotEmpty()) IconButton(onClick = { query = ""; focus.clearFocus() }) {
+                              Icon(Icons.Filled.Close, "Clear")
+                          }
+                      },
+                      singleLine = true,
+                      shape = RoundedCornerShape(16.dp),
+                      colors = TextFieldDefaults.colors(
+                          focusedContainerColor = Surface2,
+                          unfocusedContainerColor = Surface2,
+                          focusedIndicatorColor = Color.Transparent,
+                          unfocusedIndicatorColor = Color.Transparent,
+                          cursorColor = Indigo,
+                      ),
+                      modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                  )
+                  Spacer(Modifier.height(4.dp))
+                  if (debounced.isEmpty()) {
+                      PagedGrid(
+                          key = "trending-search",
+                          loader = { api.discover(Category.TRENDING, it) },
+                          onOpen = onOpen,
+                          header = {
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  Icon(Icons.Filled.Search, null, tint = Indigo, modifier = Modifier.size(18.dp))
+                                  Text("  Trending this week", style = MaterialTheme.typography.titleMedium)
+                              }
+                          },
+                      )
+                  } else {
+                      PagedGrid(
+                          key = "q:$debounced",
+                          loader = { api.search(debounced, it) },
+                          onOpen = onOpen,
+                          emptyTitle = "No results for \"$debounced\"",
+                      )
+                  }
+              }
+          }
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/java/com/feynos/seerr/ui/screens'
+          cat > 'app/src/main/java/com/feynos/seerr/ui/screens/DetailsScreen.kt' <<'FEYNOS_EOF'
+          package com.feynos.seerr.ui.screens
+
+          import android.content.Intent
+          import android.net.Uri
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.ExperimentalLayoutApi
+          import androidx.compose.foundation.layout.FlowRow
+          import androidx.compose.foundation.layout.PaddingValues
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.navigationBarsPadding
+          import androidx.compose.foundation.layout.offset
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.statusBarsPadding
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.LazyRow
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.automirrored.filled.ArrowBack
+          import androidx.compose.material.icons.filled.Add
+          import androidx.compose.material.icons.filled.CheckCircle
+          import androidx.compose.material.icons.filled.CloudOff
+          import androidx.compose.material.icons.filled.PlayArrow
+          import androidx.compose.material.icons.filled.Schedule
+          import androidx.compose.material.icons.filled.Star
+          import androidx.compose.material.icons.filled.Theaters
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.ButtonDefaults
+          import androidx.compose.material3.Checkbox
+          import androidx.compose.material3.CheckboxDefaults
+          import androidx.compose.material3.CircularProgressIndicator
+          import androidx.compose.material3.ExperimentalMaterial3Api
+          import androidx.compose.material3.HorizontalDivider
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.IconButton
+          import androidx.compose.material3.IconButtonDefaults
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.ModalBottomSheet
+          import androidx.compose.material3.OutlinedButton
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TextButton
+          import androidx.compose.material3.rememberModalBottomSheetState
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableIntStateOf
+          import androidx.compose.runtime.mutableStateListOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.rememberCoroutineScope
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontStyle
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import coil.compose.AsyncImage
+          import com.feynos.seerr.LocalApi
+          import com.feynos.seerr.LocalSnackbar
+          import com.feynos.seerr.data.Details
+          import com.feynos.seerr.data.MediaItem
+          import com.feynos.seerr.data.MediaStatus
+          import com.feynos.seerr.data.tmdbImage
+          import com.feynos.seerr.ui.components.Badge
+          import com.feynos.seerr.ui.components.MediaRow
+          import com.feynos.seerr.ui.components.MessageState
+          import com.feynos.seerr.ui.components.SectionHeader
+          import com.feynos.seerr.ui.components.ShimmerBox
+          import com.feynos.seerr.ui.components.TypePill
+          import com.feynos.seerr.ui.components.formatRuntime
+          import com.feynos.seerr.ui.components.mediaStatusStyle
+          import com.feynos.seerr.ui.theme.Green
+          import com.feynos.seerr.ui.theme.Indigo
+          import com.feynos.seerr.ui.theme.Night
+          import com.feynos.seerr.ui.theme.Surface1
+          import com.feynos.seerr.ui.theme.Surface2
+          import com.feynos.seerr.ui.theme.TextMuted
+          import com.feynos.seerr.ui.theme.Yellow
+          import kotlinx.coroutines.launch
+
+          @OptIn(ExperimentalLayoutApi::class)
+          @Composable
+          fun DetailsScreen(type: String, id: Int, onBack: () -> Unit, onOpen: (MediaItem) -> Unit) {
+              val api = LocalApi.current
+              val snackbar = LocalSnackbar.current
+              val context = LocalContext.current
+              val scope = rememberCoroutineScope()
+
+              var details by remember { mutableStateOf(api.cachedDetails(type, id)) }
+              var related by remember { mutableStateOf<List<MediaItem>?>(null) }
+              var error by remember { mutableStateOf<String?>(null) }
+              var reload by remember { mutableIntStateOf(0) }
+              var requesting by remember { mutableStateOf(false) }
+              var showSeasonSheet by remember { mutableStateOf(false) }
+
+              LaunchedEffect(type, id, reload) {
+                  error = null
+                  try {
+                      details = api.details(type, id, force = reload > 0)
+                  } catch (e: Exception) {
+                      if (details == null) error = e.message ?: "Couldn't load"
+                  }
+              }
+              LaunchedEffect(type, id) { related = api.recommendations(type, id) }
+
+              fun openUrl(url: String) {
+                  runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+              }
+
+              fun doRequest(seasons: List<Int>? = null) {
+                  val d = details ?: return
+                  requesting = true
+                  scope.launch {
+                      try {
+                          if (d.isTv) api.requestTv(d.id, seasons ?: emptyList()) else api.requestMovie(d.id)
+                          snackbar.showSnackbar("Requested ${d.title}")
+                          reload++
+                      } catch (e: Exception) {
+                          snackbar.showSnackbar(e.message ?: "Request failed")
+                      } finally {
+                          requesting = false
+                      }
+                  }
+              }
+
+              Box(Modifier.fillMaxSize()) {
+                  val d = details
+                  when {
+                      error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                          MessageState(Icons.Filled.CloudOff, "Couldn't load title", error, "Retry", { reload++ })
+                      }
+                      d == null -> DetailsSkeleton()
+                      else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
+                          item { Backdrop(d) }
+                          item {
+                              Row(
+                                  Modifier.padding(horizontal = 20.dp).offset(y = (-72).dp),
+                                  verticalAlignment = Alignment.Bottom,
+                              ) {
+                                  Box(
+                                      Modifier.width(120.dp).height(180.dp).clip(RoundedCornerShape(14.dp)).background(Surface2)
+                                  ) {
+                                      AsyncImage(
+                                          tmdbImage(d.posterPath, "w342"), d.title,
+                                          Modifier.fillMaxSize(), contentScale = ContentScale.Crop,
+                                      )
+                                  }
+                                  Spacer(Modifier.width(16.dp))
+                                  Column(Modifier.weight(1f).padding(bottom = 4.dp)) {
+                                      TypePill(d.mediaType)
+                                      Spacer(Modifier.height(6.dp))
+                                      Text(d.title, style = MaterialTheme.typography.headlineMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                      Spacer(Modifier.height(6.dp))
+                                      MetaLine(d)
+                                  }
+                              }
+                          }
+                          item {
+                              Column(Modifier.padding(horizontal = 20.dp).offset(y = (-56).dp)) {
+                                  Actions(
+                                      d, requesting,
+                                      onRequest = { if (d.isTv) showSeasonSheet = true else doRequest() },
+                                      onPlay = { d.mediaUrl?.let { openUrl(it) } },
+                                      onTrailer = { d.trailerUrl?.let { openUrl(it) } },
+                                  )
+                                  if (!d.tagline.isNullOrBlank()) {
+                                      Spacer(Modifier.height(20.dp))
+                                      Text("“${d.tagline}”", fontStyle = FontStyle.Italic, color = TextMuted)
+                                  }
+                                  Spacer(Modifier.height(12.dp))
+                                  Text("Overview", style = MaterialTheme.typography.titleMedium)
+                                  Spacer(Modifier.height(6.dp))
+                                  Text(d.overview.ifBlank { "No overview available." }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f))
+                                  if (d.genres.isNotEmpty()) {
+                                      Spacer(Modifier.height(14.dp))
+                                      FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                          d.genres.forEach { g ->
+                                              Text(
+                                                  g,
+                                                  Modifier.clip(RoundedCornerShape(50)).background(Surface2).padding(horizontal = 12.dp, vertical = 6.dp),
+                                                  style = MaterialTheme.typography.labelMedium,
+                                              )
+                                          }
+                                      }
+                                  }
+                                  if (d.studio != null) {
+                                      Spacer(Modifier.height(12.dp))
+                                      Text(
+                                          (if (d.isTv) "Network: " else "Studio: ") + d.studio,
+                                          color = TextMuted, style = MaterialTheme.typography.bodySmall,
+                                      )
+                                  }
+                              }
+                          }
+                          if (d.isTv && d.seasons.isNotEmpty()) {
+                              item {
+                                  Column(Modifier.offset(y = (-40).dp)) {
+                                      SectionHeader("Seasons")
+                                      Column(Modifier.padding(horizontal = 16.dp).clip(RoundedCornerShape(16.dp)).background(Surface1)) {
+                                          d.seasons.forEachIndexed { i, s ->
+                                              if (i > 0) HorizontalDivider(color = Surface2)
+                                              Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                  Column(Modifier.weight(1f)) {
+                                                      Text(s.name, style = MaterialTheme.typography.titleSmall)
+                                                      Text(
+                                                          listOfNotNull("${s.episodeCount} episodes", s.airYear.ifBlank { null }).joinToString(" • "),
+                                                          color = TextMuted, style = MaterialTheme.typography.bodySmall,
+                                                      )
+                                                  }
+                                                  seasonBadge(d, s.number)?.let { Badge(it) }
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                          if (d.cast.isNotEmpty()) {
+                              item {
+                                  Column(Modifier.offset(y = (-32).dp)) {
+                                      SectionHeader("Cast")
+                                      LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                                          items(d.cast, key = { it.id.toString() + it.character }) { c ->
+                                              Column(Modifier.width(84.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                                  Box(Modifier.size(76.dp).clip(CircleShape).background(Surface2), contentAlignment = Alignment.Center) {
+                                                      Text(c.name.take(1), style = MaterialTheme.typography.titleLarge, color = TextMuted)
+                                                      AsyncImage(tmdbImage(c.profilePath, "w185"), c.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                  }
+                                                  Spacer(Modifier.height(6.dp))
+                                                  Text(c.name, style = MaterialTheme.typography.labelMedium, maxLines = 2, textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis)
+                                                  Text(c.character, style = MaterialTheme.typography.bodySmall, color = TextMuted, maxLines = 1, textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis)
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                          item {
+                              Column(Modifier.offset(y = (-24).dp).navigationBarsPadding()) {
+                                  MediaRow("More Like This", related, onOpen)
+                              }
+                          }
+                      }
+                  }
+
+                  IconButton(
+                      onClick = onBack,
+                      colors = IconButtonDefaults.iconButtonColors(containerColor = Color.Black.copy(alpha = 0.45f), contentColor = Color.White),
+                      modifier = Modifier.statusBarsPadding().padding(8.dp),
+                  ) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+
+                  val sd = details
+                  if (showSeasonSheet && sd != null) {
+                      SeasonSheet(sd, onDismiss = { showSeasonSheet = false }) { seasons ->
+                          showSeasonSheet = false
+                          doRequest(seasons)
+                      }
+                  }
+              }
+          }
+
+          private fun seasonBadge(d: Details, n: Int) = when {
+              d.seasonStatus[n] == MediaStatus.AVAILABLE || d.status == MediaStatus.AVAILABLE -> mediaStatusStyle(MediaStatus.AVAILABLE)
+              d.seasonStatus[n] == MediaStatus.PARTIAL -> mediaStatusStyle(MediaStatus.PARTIAL)
+              d.seasonStatus[n] == MediaStatus.PROCESSING -> mediaStatusStyle(MediaStatus.PROCESSING)
+              n in d.requestedSeasons || d.seasonStatus[n] == MediaStatus.PENDING -> mediaStatusStyle(MediaStatus.PENDING)
+              else -> null
+          }
+
+          private fun seasonLocked(d: Details, n: Int) = seasonBadge(d, n) != null &&
+              d.seasonStatus[n] != MediaStatus.PARTIAL
+
+          @Composable
+          private fun Backdrop(d: Details) {
+              Box(Modifier.fillMaxWidth().height(320.dp)) {
+                  AsyncImage(
+                      tmdbImage(d.backdropPath ?: d.posterPath, "w1280"), null,
+                      Modifier.fillMaxSize(), contentScale = ContentScale.Crop,
+                  )
+                  Box(
+                      Modifier.fillMaxSize().background(
+                          Brush.verticalGradient(0f to Night.copy(alpha = 0.5f), 0.3f to Color.Transparent, 1f to Night)
+                      )
+                  )
+              }
+          }
+
+          @Composable
+          private fun MetaLine(d: Details) {
+              Row(verticalAlignment = Alignment.CenterVertically) {
+                  if (d.rating > 0) {
+                      Icon(Icons.Filled.Star, null, tint = Yellow, modifier = Modifier.size(15.dp))
+                      Spacer(Modifier.width(3.dp))
+                      Text("%.1f".format(d.rating), style = MaterialTheme.typography.labelLarge)
+                  }
+                  val parts = listOfNotNull(
+                      d.year.ifBlank { null },
+                      if (d.isTv) d.seasons.size.takeIf { it > 0 }?.let { "$it season" + if (it > 1) "s" else "" } else formatRuntime(d.runtime),
+                  )
+                  if (parts.isNotEmpty()) {
+                      Text(
+                          (if (d.rating > 0) "  •  " else "") + parts.joinToString("  •  "),
+                          color = TextMuted, style = MaterialTheme.typography.labelLarge,
+                      )
+                  }
+              }
+          }
+
+          @Composable
+          private fun Actions(
+              d: Details,
+              requesting: Boolean,
+              onRequest: () -> Unit,
+              onPlay: () -> Unit,
+              onTrailer: () -> Unit,
+          ) {
+              val fullyAvailable = d.status == MediaStatus.AVAILABLE
+              val allSeasonsCovered = d.isTv && d.seasons.isNotEmpty() && d.seasons.all { seasonLocked(d, it.number) }
+              val blocked = fullyAvailable || (!d.isTv && (d.hasActiveRequest || d.status == MediaStatus.PROCESSING || d.status == MediaStatus.PENDING)) || allSeasonsCovered
+
+              Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                  mediaStatusStyle(d.status)?.let { Badge(it) }
+                  Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                      if (d.mediaUrl != null && (d.status == MediaStatus.AVAILABLE || d.status == MediaStatus.PARTIAL)) {
+                          Button(
+                              onClick = onPlay,
+                              colors = ButtonDefaults.buttonColors(containerColor = Green),
+                              shape = RoundedCornerShape(12.dp),
+                              modifier = Modifier.weight(1f).height(48.dp),
+                          ) {
+                              Icon(Icons.Filled.PlayArrow, null)
+                              Spacer(Modifier.width(6.dp))
+                              Text("Play", fontWeight = FontWeight.Bold)
+                          }
+                      }
+                      if (!blocked) {
+                          Button(
+                              onClick = onRequest,
+                              enabled = !requesting,
+                              colors = ButtonDefaults.buttonColors(containerColor = Indigo),
+                              shape = RoundedCornerShape(12.dp),
+                              modifier = Modifier.weight(1f).height(48.dp),
+                          ) {
+                              if (requesting) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
+                              else Icon(Icons.Filled.Add, null)
+                              Spacer(Modifier.width(6.dp))
+                              Text(if (d.isTv && d.status == MediaStatus.PARTIAL) "Request More" else "Request", fontWeight = FontWeight.Bold)
+                          }
+                      } else if (d.mediaUrl == null || !(d.status == MediaStatus.AVAILABLE || d.status == MediaStatus.PARTIAL)) {
+                          Row(
+                              Modifier.weight(1f).height(48.dp).clip(RoundedCornerShape(12.dp)).background(Surface2).padding(horizontal = 14.dp),
+                              verticalAlignment = Alignment.CenterVertically,
+                              horizontalArrangement = Arrangement.Center,
+                          ) {
+                              val avail = fullyAvailable
+                              Icon(if (avail) Icons.Filled.CheckCircle else Icons.Filled.Schedule, null, tint = if (avail) Green else Yellow, modifier = Modifier.size(18.dp))
+                              Spacer(Modifier.width(8.dp))
+                              Text(if (avail) "In your library" else "Requested", style = MaterialTheme.typography.labelLarge)
+                          }
+                      }
+                      if (d.trailerUrl != null) {
+                          OutlinedButton(
+                              onClick = onTrailer,
+                              shape = RoundedCornerShape(12.dp),
+                              modifier = Modifier.height(48.dp),
+                          ) {
+                              Icon(Icons.Filled.Theaters, null, Modifier.size(18.dp))
+                              Spacer(Modifier.width(6.dp))
+                              Text("Trailer")
+                          }
+                      }
+                  }
+              }
+          }
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          private fun SeasonSheet(d: Details, onDismiss: () -> Unit, onConfirm: (List<Int>) -> Unit) {
+              val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+              val requestable = d.seasons.filter { !seasonLocked(d, it.number) }.map { it.number }
+              val selected = remember { mutableStateListOf<Int>().apply { addAll(requestable) } }
+
+              ModalBottomSheet(onDismissRequest = onDismiss, sheetState = state, containerColor = Surface1) {
+                  Column(Modifier.padding(horizontal = 20.dp).navigationBarsPadding()) {
+                      Text("Request ${d.title}", style = MaterialTheme.typography.titleLarge)
+                      Text("Choose the seasons you'd like", color = TextMuted, style = MaterialTheme.typography.bodyMedium)
+                      Spacer(Modifier.height(12.dp))
+                      Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                          Text("${selected.size} selected", color = TextMuted, modifier = Modifier.weight(1f))
+                          TextButton(onClick = {
+                              if (selected.size == requestable.size) selected.clear()
+                              else { selected.clear(); selected.addAll(requestable) }
+                          }) { Text(if (selected.size == requestable.size) "Clear" else "Select all") }
+                      }
+                      Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                          d.seasons.forEach { s ->
+                              val locked = seasonLocked(d, s.number)
+                              val checked = locked || s.number in selected
+                              Row(
+                                  Modifier
+                                      .fillMaxWidth()
+                                      .clip(RoundedCornerShape(12.dp))
+                                      .clickable(enabled = !locked) {
+                                          if (s.number in selected) selected.remove(s.number) else selected.add(s.number)
+                                      }
+                                      .padding(vertical = 6.dp),
+                                  verticalAlignment = Alignment.CenterVertically,
+                              ) {
+                                  Checkbox(
+                                      checked = checked,
+                                      onCheckedChange = null,
+                                      enabled = !locked,
+                                      colors = CheckboxDefaults.colors(checkedColor = Indigo),
+                                  )
+                                  Spacer(Modifier.width(8.dp))
+                                  Column(Modifier.weight(1f)) {
+                                      Text(s.name, style = MaterialTheme.typography.titleSmall)
+                                      Text("${s.episodeCount} episodes", color = TextMuted, style = MaterialTheme.typography.bodySmall)
+                                  }
+                                  seasonBadge(d, s.number)?.let { Badge(it, compact = true) }
+                              }
+                          }
+                      }
+                      Spacer(Modifier.height(12.dp))
+                      Button(
+                          onClick = { onConfirm(selected.sorted()) },
+                          enabled = selected.isNotEmpty(),
+                          colors = ButtonDefaults.buttonColors(containerColor = Indigo),
+                          shape = RoundedCornerShape(12.dp),
+                          modifier = Modifier.fillMaxWidth().height(50.dp),
+                      ) {
+                          Text(
+                              if (selected.isEmpty()) "Select seasons" else "Request ${selected.size} season" + if (selected.size > 1) "s" else "",
+                              fontWeight = FontWeight.Bold,
+                          )
+                      }
+                      Spacer(Modifier.height(16.dp))
+                  }
+              }
+          }
+
+          @Composable
+          private fun DetailsSkeleton() {
+              Column(Modifier.fillMaxSize()) {
+                  ShimmerBox(Modifier.fillMaxWidth().height(320.dp))
+                  Row(Modifier.padding(20.dp)) {
+                      ShimmerBox(Modifier.width(120.dp).height(180.dp).clip(RoundedCornerShape(14.dp)))
+                      Spacer(Modifier.width(16.dp))
+                      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                          ShimmerBox(Modifier.width(180.dp).height(24.dp).clip(RoundedCornerShape(6.dp)))
+                          ShimmerBox(Modifier.width(120.dp).height(16.dp).clip(RoundedCornerShape(6.dp)))
+                      }
+                  }
+                  repeat(4) {
+                      ShimmerBox(Modifier.padding(horizontal = 20.dp, vertical = 5.dp).fillMaxWidth().height(14.dp).clip(RoundedCornerShape(6.dp)))
+                  }
+              }
+          }
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/java/com/feynos/seerr/ui/screens'
+          cat > 'app/src/main/java/com/feynos/seerr/ui/screens/DiscoverScreen.kt' <<'FEYNOS_EOF'
+          package com.feynos.seerr.ui.screens
+
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.statusBarsPadding
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.pager.HorizontalPager
+          import androidx.compose.foundation.pager.rememberPagerState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.CloudOff
+          import androidx.compose.material.icons.filled.Info
+          import androidx.compose.material.icons.filled.Star
+          import androidx.compose.material.icons.filled.Visibility
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.ButtonDefaults
+          import androidx.compose.material3.ExperimentalMaterial3Api
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableIntStateOf
+          import androidx.compose.runtime.mutableStateMapOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.rememberCoroutineScope
+          import androidx.compose.runtime.saveable.rememberSaveable
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import coil.compose.AsyncImage
+          import com.feynos.seerr.LocalApi
+          import com.feynos.seerr.data.ApiException
+          import com.feynos.seerr.data.Category
+          import com.feynos.seerr.data.MediaItem
+          import com.feynos.seerr.data.tmdbImage
+          import com.feynos.seerr.ui.components.Badge
+          import com.feynos.seerr.ui.components.MediaRow
+          import com.feynos.seerr.ui.components.MessageState
+          import com.feynos.seerr.ui.components.ShimmerBox
+          import com.feynos.seerr.ui.components.TypePill
+          import com.feynos.seerr.ui.components.mediaStatusStyle
+          import com.feynos.seerr.ui.theme.BrandGradient
+          import com.feynos.seerr.ui.theme.Indigo
+          import com.feynos.seerr.ui.theme.Night
+          import com.feynos.seerr.ui.theme.TextMuted
+          import com.feynos.seerr.ui.theme.Yellow
+          import kotlinx.coroutines.async
+          import kotlinx.coroutines.coroutineScope
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
+
+          private val rowCategories = listOf(
+              Category.POPULAR_MOVIES, Category.POPULAR_TV, Category.UPCOMING_MOVIES, Category.UPCOMING_TV,
+          )
+
+          // Survives tab switches
+          private val discoverCache = mutableStateMapOf<Category, List<MediaItem>>()
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun DiscoverScreen(
+              onOpen: (MediaItem) -> Unit,
+              onCategory: (Category) -> Unit,
+              onSessionExpired: () -> Unit,
+          ) {
+              val api = LocalApi.current
+              val scope = rememberCoroutineScope()
+              var error by remember { mutableStateOf<String?>(null) }
+              var refreshing by remember { mutableStateOf(false) }
+              var reloadKey by rememberSaveable { mutableIntStateOf(0) }
+
+              suspend fun load() {
+                  error = null
+                  try {
+                      coroutineScope {
+                          (listOf(Category.TRENDING) + rowCategories).map { cat ->
+                              async { cat to api.discover(cat).items }
+                          }.forEach {
+                              val (cat, items) = it.await()
+                              discoverCache[cat] = items
+                          }
+                      }
+                  } catch (e: ApiException) {
+                      if (e.code == 401 || e.code == 403) onSessionExpired() else error = e.message
+                  } catch (e: Exception) {
+                      error = e.message ?: "Couldn't reach server"
+                  }
+              }
+
+              LaunchedEffect(reloadKey) {
+                  if (discoverCache.isEmpty() || reloadKey > 0) load()
+              }
+
+              if (error != null && discoverCache.isEmpty()) {
+                  Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                      MessageState(Icons.Filled.CloudOff, "Can't reach Seerr", error, "Retry", { reloadKey++ })
+                  }
+                  return
+              }
+
+              PullToRefreshBox(
+                  isRefreshing = refreshing,
+                  onRefresh = {
+                      scope.launch { refreshing = true; load(); refreshing = false }
+                  },
+                  modifier = Modifier.fillMaxSize(),
+              ) {
+                  LazyColumn(Modifier.fillMaxSize()) {
+                      item {
+                          Hero(discoverCache[Category.TRENDING]?.filter { it.backdropPath != null }?.take(8), onOpen)
+                      }
+                      item {
+                          MediaRow("Trending Now", discoverCache[Category.TRENDING], onOpen) { onCategory(Category.TRENDING) }
+                      }
+                      rowCategories.forEach { cat ->
+                          item(key = cat.name) {
+                              MediaRow(cat.title, discoverCache[cat], onOpen) { onCategory(cat) }
+                          }
+                      }
+                      item { Spacer(Modifier.height(24.dp)) }
+                  }
+              }
+          }
+
+          @Composable
+          private fun Hero(items: List<MediaItem>?, onOpen: (MediaItem) -> Unit) {
+              val height = 460.dp
+              if (items == null) {
+                  ShimmerBox(Modifier.fillMaxWidth().height(height))
+                  return
+              }
+              if (items.isEmpty()) return
+              val pager = rememberPagerState { items.size }
+
+              LaunchedEffect(pager, items.size) {
+                  while (true) {
+                      delay(6000)
+                      if (!pager.isScrollInProgress) {
+                          pager.animateScrollToPage((pager.currentPage + 1) % items.size)
+                      }
+                  }
+              }
+
+              Box(Modifier.fillMaxWidth().height(height)) {
+                  HorizontalPager(pager, Modifier.fillMaxSize()) { page ->
+                      val item = items[page]
+                      Box(Modifier.fillMaxSize().clickable { onOpen(item) }) {
+                          AsyncImage(
+                              model = tmdbImage(item.backdropPath, "w1280"),
+                              contentDescription = item.title,
+                              contentScale = ContentScale.Crop,
+                              modifier = Modifier.fillMaxSize(),
+                          )
+                          Box(
+                              Modifier.fillMaxSize().background(
+                                  Brush.verticalGradient(
+                                      0f to Night.copy(alpha = 0.55f),
+                                      0.25f to Color.Transparent,
+                                      0.55f to Night.copy(alpha = 0.35f),
+                                      1f to Night,
+                                  )
+                              )
+                          )
+                          Column(
+                              Modifier.align(Alignment.BottomStart).padding(horizontal = 20.dp, vertical = 36.dp)
+                          ) {
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  TypePill(item.mediaType)
+                                  Spacer(Modifier.width(8.dp))
+                                  if (item.rating > 0) {
+                                      Icon(Icons.Filled.Star, null, tint = Yellow, modifier = Modifier.size(14.dp))
+                                      Spacer(Modifier.width(3.dp))
+                                      Text("%.1f".format(item.rating), style = MaterialTheme.typography.labelLarge)
+                                      Spacer(Modifier.width(8.dp))
+                                  }
+                                  if (item.year.isNotBlank()) Text(item.year, color = TextMuted, style = MaterialTheme.typography.labelLarge)
+                              }
+                              Spacer(Modifier.height(8.dp))
+                              Text(
+                                  item.title,
+                                  style = MaterialTheme.typography.headlineLarge,
+                                  maxLines = 2,
+                                  overflow = TextOverflow.Ellipsis,
+                              )
+                              Spacer(Modifier.height(6.dp))
+                              Text(
+                                  item.overview,
+                                  style = MaterialTheme.typography.bodyMedium,
+                                  color = TextMuted,
+                                  maxLines = 3,
+                                  overflow = TextOverflow.Ellipsis,
+                              )
+                              Spacer(Modifier.height(14.dp))
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  Button(
+                                      onClick = { onOpen(item) },
+                                      colors = ButtonDefaults.buttonColors(containerColor = Indigo),
+                                      shape = RoundedCornerShape(12.dp),
+                                  ) {
+                                      Icon(Icons.Filled.Info, null, Modifier.size(18.dp))
+                                      Spacer(Modifier.width(6.dp))
+                                      Text("Details", fontWeight = FontWeight.Bold)
+                                  }
+                                  Spacer(Modifier.width(12.dp))
+                                  mediaStatusStyle(item.status)?.let { Badge(it) }
+                              }
+                          }
+                      }
+                  }
+
+                  // Header
+                  Row(
+                      Modifier.statusBarsPadding().padding(horizontal = 20.dp, vertical = 10.dp),
+                      verticalAlignment = Alignment.CenterVertically,
+                  ) {
+                      Box(Modifier.size(28.dp).clip(RoundedCornerShape(8.dp)).background(BrandGradient), contentAlignment = Alignment.Center) {
+                          Icon(Icons.Filled.Visibility, null, tint = Color.White, modifier = Modifier.size(18.dp))
+                      }
+                      Spacer(Modifier.width(10.dp))
+                      Text("Seerr", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+                  }
+
+                  // Indicators
+                  Row(
+                      Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp),
+                      horizontalArrangement = Arrangement.spacedBy(6.dp),
+                  ) {
+                      repeat(items.size) { i ->
+                          val sel = i == pager.currentPage
+                          Box(
+                              Modifier
+                                  .height(6.dp)
+                                  .width(if (sel) 20.dp else 6.dp)
+                                  .clip(CircleShape)
+                                  .background(if (sel) Indigo else Color.White.copy(alpha = 0.35f))
+                          )
+                      }
+                  }
+              }
+          }
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/java/com/feynos/seerr/ui/screens'
+          cat > 'app/src/main/java/com/feynos/seerr/ui/screens/LoginScreen.kt' <<'FEYNOS_EOF'
+          package com.feynos.seerr.ui.screens
+
+          import android.net.Uri
+          import androidx.browser.customtabs.CustomTabsIntent
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.imePadding
+          import androidx.compose.foundation.layout.navigationBarsPadding
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.statusBarsPadding
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.text.KeyboardOptions
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.Dns
+          import androidx.compose.material.icons.filled.Key
+          import androidx.compose.material.icons.filled.Lock
+          import androidx.compose.material.icons.filled.Person
+          import androidx.compose.material.icons.filled.Visibility
+          import androidx.compose.material.icons.filled.VisibilityOff
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.ButtonDefaults
+          import androidx.compose.material3.CircularProgressIndicator
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.IconButton
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.OutlinedTextField
+          import androidx.compose.material3.OutlinedTextFieldDefaults
+          import androidx.compose.material3.Surface
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.rememberCoroutineScope
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.blur
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.ImeAction
+          import androidx.compose.ui.text.input.KeyboardType
+          import androidx.compose.ui.text.input.PasswordVisualTransformation
+          import androidx.compose.ui.text.input.VisualTransformation
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.unit.dp
+          import com.feynos.seerr.LocalApi
+          import com.feynos.seerr.ui.components.clickableNoRipple
+          import com.feynos.seerr.ui.theme.BrandGradient
+          import com.feynos.seerr.ui.theme.Indigo
+          import com.feynos.seerr.ui.theme.IndigoDark
+          import com.feynos.seerr.ui.theme.Purple
+          import com.feynos.seerr.ui.theme.Red
+          import com.feynos.seerr.ui.theme.Surface1
+          import com.feynos.seerr.ui.theme.Surface2
+          import com.feynos.seerr.ui.theme.Surface3
+          import com.feynos.seerr.ui.theme.TextMuted
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
+
+          private enum class Method(val key: String, val label: String) {
+              LOCAL("local", "Seerr"),
+              JELLYFIN("jellyfin", "Jellyfin"),
+              PLEX("plex", "Plex"),
+              APIKEY("apikey", "API Key"),
+          }
+
+          @Composable
+          fun LoginScreen(onLoggedIn: () -> Unit) {
+              val api = LocalApi.current
+              val context = LocalContext.current
+              val scope = rememberCoroutineScope()
+
+              var server by remember { mutableStateOf(api.prefs.server) }
+              var method by remember { mutableStateOf(Method.entries.firstOrNull { it.key == api.prefs.lastMethod } ?: Method.LOCAL) }
+              var user by remember { mutableStateOf("") }
+              var password by remember { mutableStateOf("") }
+              var apiKey by remember { mutableStateOf("") }
+              var showPassword by remember { mutableStateOf(false) }
+              var loading by remember { mutableStateOf(false) }
+              var status by remember { mutableStateOf<String?>(null) }
+              var error by remember { mutableStateOf<String?>(null) }
+
+              fun normalize(url: String): String {
+                  var u = url.trim().trimEnd('/')
+                  if (u.isNotEmpty() && !u.startsWith("http://") && !u.startsWith("https://")) u = "https://$u"
+                  return u
+              }
+
+              fun submit() {
+                  error = null
+                  val url = normalize(server)
+                  if (url.isBlank()) { error = "Enter your Seerr server address"; return }
+                  loading = true
+                  scope.launch {
+                      try {
+                          api.prefs.server = url
+                          server = url
+                          status = "Connecting to server…"
+                          api.status()
+                          api.prefs.lastMethod = method.key
+                          when (method) {
+                              Method.LOCAL -> { status = "Signing in…"; api.loginLocal(user.trim(), password) }
+                              Method.JELLYFIN -> { status = "Signing in…"; api.loginJellyfin(user.trim(), password) }
+                              Method.APIKEY -> { status = "Checking key…"; api.loginApiKey(apiKey.trim()) }
+                              Method.PLEX -> {
+                                  status = "Opening Plex sign-in…"
+                                  val pin = api.createPlexPin()
+                                  CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(api.plexAuthUrl(pin)))
+                                  status = "Waiting for Plex approval…"
+                                  var token: String? = null
+                                  var tries = 0
+                                  while (token == null && tries < 150) {
+                                      delay(2000)
+                                      token = runCatching { api.checkPlexPin(pin) }.getOrNull()
+                                      tries++
+                                  }
+                                  if (token == null) throw Exception("Plex sign-in timed out")
+                                  status = "Signing in…"
+                                  api.loginPlex(token)
+                              }
+                          }
+                          onLoggedIn()
+                      } catch (e: Exception) {
+                          error = e.message ?: "Couldn't connect"
+                      } finally {
+                          loading = false
+                          status = null
+                      }
+                  }
+              }
+
+              Box(Modifier.fillMaxSize()) {
+                  // Ambient glow background
+                  Box(
+                      Modifier.size(320.dp).align(Alignment.TopStart).padding(top = 0.dp)
+                          .blur(120.dp).background(IndigoDark.copy(alpha = 0.45f), CircleShape)
+                  )
+                  Box(
+                      Modifier.size(280.dp).align(Alignment.BottomEnd)
+                          .blur(120.dp).background(Purple.copy(alpha = 0.3f), CircleShape)
+                  )
+
+                  Column(
+                      Modifier
+                          .fillMaxSize()
+                          .statusBarsPadding()
+                          .navigationBarsPadding()
+                          .imePadding()
+                          .verticalScroll(rememberScrollState())
+                          .padding(horizontal = 24.dp),
+                      horizontalAlignment = Alignment.CenterHorizontally,
+                  ) {
+                      Spacer(Modifier.height(56.dp))
+                      Box(
+                          Modifier.size(88.dp).clip(RoundedCornerShape(26.dp)).background(BrandGradient),
+                          contentAlignment = Alignment.Center,
+                      ) {
+                          Icon(Icons.Filled.Visibility, null, tint = Color.White, modifier = Modifier.size(48.dp))
+                      }
+                      Spacer(Modifier.height(20.dp))
+                      Text("Feynos Seerr", style = MaterialTheme.typography.headlineLarge)
+                      Spacer(Modifier.height(6.dp))
+                      Text(
+                          "Discover and request movies & shows\nfor your media server",
+                          color = TextMuted,
+                          textAlign = TextAlign.Center,
+                      )
+                      Spacer(Modifier.height(32.dp))
+
+                      Surface(
+                          color = Surface1.copy(alpha = 0.85f),
+                          shape = RoundedCornerShape(24.dp),
+                          modifier = Modifier.fillMaxWidth(),
+                      ) {
+                          Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                              Field(server, { server = it }, "Server address", Icons.Filled.Dns,
+                                  placeholder = "requests.example.com", keyboard = KeyboardType.Uri)
+
+                              // Method selector
+                              Row(
+                                  Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Surface2).padding(4.dp),
+                              ) {
+                                  Method.entries.forEach { m ->
+                                      val sel = m == method
+                                      Box(
+                                          Modifier
+                                              .weight(1f)
+                                              .clip(RoundedCornerShape(10.dp))
+                                              .background(if (sel) Brush.linearGradient(listOf(IndigoDark, Indigo)) else Brush.linearGradient(listOf(Color.Transparent, Color.Transparent)))
+                                              .clickableNoRipple { method = m; error = null }
+                                              .padding(vertical = 10.dp),
+                                          contentAlignment = Alignment.Center,
+                                      ) {
+                                          Text(
+                                              m.label,
+                                              style = MaterialTheme.typography.labelLarge,
+                                              color = if (sel) Color.White else TextMuted,
+                                          )
+                                      }
+                                  }
+                              }
+
+                              when (method) {
+                                  Method.LOCAL, Method.JELLYFIN -> {
+                                      Field(user, { user = it }, if (method == Method.LOCAL) "Email" else "Jellyfin username",
+                                          Icons.Filled.Person, keyboard = if (method == Method.LOCAL) KeyboardType.Email else KeyboardType.Text)
+                                      OutlinedTextField(
+                                          value = password,
+                                          onValueChange = { password = it },
+                                          label = { Text("Password") },
+                                          leadingIcon = { Icon(Icons.Filled.Lock, null) },
+                                          trailingIcon = {
+                                              IconButton(onClick = { showPassword = !showPassword }) {
+                                                  Icon(if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility, null)
+                                              }
+                                          },
+                                          visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                                          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                                          singleLine = true,
+                                          shape = RoundedCornerShape(14.dp),
+                                          colors = fieldColors(),
+                                          modifier = Modifier.fillMaxWidth(),
+                                      )
+                                  }
+                                  Method.APIKEY -> {
+                                      Field(apiKey, { apiKey = it }, "API key", Icons.Filled.Key)
+                                      Text(
+                                          "Find it in Seerr → Settings → General. API keys act as the admin account.",
+                                          color = TextMuted, style = MaterialTheme.typography.bodySmall,
+                                      )
+                                  }
+                                  Method.PLEX -> {
+                                      Text(
+                                          "You'll be sent to plex.tv to approve this device, then brought back here automatically.",
+                                          color = TextMuted, style = MaterialTheme.typography.bodyMedium,
+                                      )
+                                  }
+                              }
+
+                              if (error != null) {
+                                  Text(error!!, color = Red, style = MaterialTheme.typography.bodyMedium)
+                              }
+
+                              Button(
+                                  onClick = { submit() },
+                                  enabled = !loading,
+                                  shape = RoundedCornerShape(14.dp),
+                                  colors = ButtonDefaults.buttonColors(containerColor = Indigo),
+                                  modifier = Modifier.fillMaxWidth().height(52.dp),
+                              ) {
+                                  if (loading) {
+                                      CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+                                      Spacer(Modifier.width(12.dp))
+                                      Text(status ?: "Working…")
+                                  } else {
+                                      Text(if (method == Method.PLEX) "Sign in with Plex" else "Sign in", fontWeight = FontWeight.Bold)
+                                  }
+                              }
+                          }
+                      }
+                      Spacer(Modifier.height(32.dp))
+                  }
+              }
+          }
+
+          @Composable
+          private fun fieldColors() = OutlinedTextFieldDefaults.colors(
+              focusedBorderColor = Indigo,
+              unfocusedBorderColor = Surface3,
+              focusedLeadingIconColor = Indigo,
+              focusedLabelColor = Indigo,
+          )
+
+          @Composable
+          private fun Field(
+              value: String,
+              onChange: (String) -> Unit,
+              label: String,
+              icon: ImageVector,
+              placeholder: String? = null,
+              keyboard: KeyboardType = KeyboardType.Text,
+          ) {
+              OutlinedTextField(
+                  value = value,
+                  onValueChange = onChange,
+                  label = { Text(label) },
+                  placeholder = if (placeholder != null) {
+                      { Text(placeholder, color = TextMuted) }
+                  } else null,
+                  leadingIcon = { Icon(icon, null) },
+                  singleLine = true,
+                  keyboardOptions = KeyboardOptions(keyboardType = keyboard, imeAction = ImeAction.Next, autoCorrectEnabled = false),
+                  shape = RoundedCornerShape(14.dp),
+                  colors = fieldColors(),
+                  modifier = Modifier.fillMaxWidth(),
+              )
+          }
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/java/com/feynos/seerr/ui/screens'
+          cat > 'app/src/main/java/com/feynos/seerr/ui/screens/ProfileScreen.kt' <<'FEYNOS_EOF'
+          package com.feynos.seerr.ui.screens
+
+          import android.content.Intent
+          import android.net.Uri
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.statusBarsPadding
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.layout.widthIn
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+          import androidx.compose.material.icons.automirrored.filled.Logout
+          import androidx.compose.material.icons.automirrored.filled.OpenInNew
+          import androidx.compose.material.icons.filled.CheckCircle
+          import androidx.compose.material.icons.filled.Dns
+          import androidx.compose.material.icons.filled.Inbox
+          import androidx.compose.material.icons.filled.Info
+          import androidx.compose.material.icons.filled.Schedule
+          import androidx.compose.material.icons.filled.Sync
+          import androidx.compose.material.icons.filled.Verified
+          import androidx.compose.material3.HorizontalDivider
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.rememberCoroutineScope
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.unit.dp
+          import com.feynos.seerr.BuildConfigInfo
+          import com.feynos.seerr.LocalApi
+          import com.feynos.seerr.data.RequestCounts
+          import com.feynos.seerr.data.ServerStatus
+          import com.feynos.seerr.data.User
+          import com.feynos.seerr.ui.components.Avatar
+          import com.feynos.seerr.ui.components.ShimmerBox
+          import com.feynos.seerr.ui.theme.Blue
+          import com.feynos.seerr.ui.theme.Green
+          import com.feynos.seerr.ui.theme.Indigo
+          import com.feynos.seerr.ui.theme.IndigoDark
+          import com.feynos.seerr.ui.theme.Night
+          import com.feynos.seerr.ui.theme.Purple
+          import com.feynos.seerr.ui.theme.Red
+          import com.feynos.seerr.ui.theme.Surface1
+          import com.feynos.seerr.ui.theme.Surface2
+          import com.feynos.seerr.ui.theme.TextMuted
+          import com.feynos.seerr.ui.theme.Yellow
+          import kotlinx.coroutines.launch
+
+          @Composable
+          fun ProfileScreen(onLoggedOut: () -> Unit) {
+              val api = LocalApi.current
+              val context = LocalContext.current
+              val scope = rememberCoroutineScope()
+              var user by remember { mutableStateOf<User?>(null) }
+              var counts by remember { mutableStateOf<RequestCounts?>(null) }
+              var myTotal by remember { mutableStateOf<Int?>(null) }
+              var status by remember { mutableStateOf<ServerStatus?>(null) }
+
+              LaunchedEffect(Unit) {
+                  val u = runCatching { api.me() }.getOrNull()
+                  user = u
+                  status = runCatching { api.status() }.getOrNull()
+                  if (u != null) {
+                      myTotal = runCatching { api.userRequestTotal(u.id) }.getOrNull()
+                      if (u.canManage) counts = runCatching { api.requestCounts() }.getOrNull()
+                  }
+              }
+
+              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                  // Header
+                  Box(
+                      Modifier.fillMaxWidth().background(
+                          Brush.verticalGradient(listOf(IndigoDark.copy(alpha = 0.55f), Purple.copy(alpha = 0.15f), Night))
+                      )
+                  ) {
+                      Column(
+                          Modifier.fillMaxWidth().statusBarsPadding().padding(top = 32.dp, bottom = 24.dp),
+                          horizontalAlignment = Alignment.CenterHorizontally,
+                      ) {
+                          val u = user
+                          if (u == null) {
+                              ShimmerBox(Modifier.size(96.dp).clip(RoundedCornerShape(50)))
+                              Spacer(Modifier.height(12.dp))
+                              ShimmerBox(Modifier.width(140.dp).height(22.dp).clip(RoundedCornerShape(6.dp)))
+                          } else {
+                              Avatar(api.absoluteUrl(u.avatar), u.displayName, 96.dp)
+                              Spacer(Modifier.height(12.dp))
+                              Text(u.displayName, style = MaterialTheme.typography.headlineMedium)
+                              if (u.email.isNotBlank()) Text(u.email, color = TextMuted)
+                              Spacer(Modifier.height(10.dp))
+                              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                  Chip(u.role, if (u.isAdmin) Purple else Indigo, Icons.Filled.Verified)
+                                  Chip(u.accountType, Blue, null)
+                              }
+                          }
+                      }
+                  }
+
+                  Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                      Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                          StatCard("My requests", myTotal?.toString() ?: "–", Icons.Filled.Inbox, Indigo, Modifier.weight(1f))
+                          StatCard(
+                              if (counts != null) "Pending (all)" else "Server",
+                              counts?.pending?.toString() ?: (status?.version?.let { "v$it" } ?: "–"),
+                              if (counts != null) Icons.Filled.Schedule else Icons.Filled.Dns,
+                              Yellow, Modifier.weight(1f),
+                          )
+                      }
+                      counts?.let { c ->
+                          Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                              StatCard("Processing", c.processing.toString(), Icons.Filled.Sync, Blue, Modifier.weight(1f))
+                              StatCard("Available", c.available.toString(), Icons.Filled.CheckCircle, Green, Modifier.weight(1f))
+                          }
+                      }
+
+                      Spacer(Modifier.height(4.dp))
+                      Column(Modifier.clip(RoundedCornerShape(16.dp)).background(Surface1)) {
+                          SettingRow(Icons.Filled.Dns, "Server", api.base.removePrefix("https://").removePrefix("http://"))
+                          HorizontalDivider(color = Surface2)
+                          SettingRow(Icons.Filled.Info, "Seerr version", status?.let { "v${it.version}" + if (it.updateAvailable) " • update available" else "" } ?: "–")
+                          HorizontalDivider(color = Surface2)
+                          SettingRow(Icons.AutoMirrored.Filled.OpenInNew, "Open web interface", null) {
+                              runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(api.base))) }
+                          }
+                          HorizontalDivider(color = Surface2)
+                          SettingRow(Icons.Filled.Info, "App version", BuildConfigInfo.versionName(context))
+                      }
+                      Column(Modifier.clip(RoundedCornerShape(16.dp)).background(Surface1)) {
+                          SettingRow(Icons.AutoMirrored.Filled.Logout, "Sign out", null, tint = Red) {
+                              scope.launch {
+                                  api.logout()
+                                  onLoggedOut()
+                              }
+                          }
+                      }
+                      Spacer(Modifier.height(24.dp))
+                  }
+              }
+          }
+
+          @Composable
+          private fun Chip(label: String, color: Color, icon: ImageVector?) {
+              Row(
+                  Modifier.clip(RoundedCornerShape(50)).background(color.copy(alpha = 0.2f)).padding(horizontal = 12.dp, vertical = 5.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+              ) {
+                  if (icon != null) {
+                      Icon(icon, null, tint = color, modifier = Modifier.size(14.dp))
+                      Spacer(Modifier.width(4.dp))
+                  }
+                  Text(label, color = color, style = MaterialTheme.typography.labelMedium)
+              }
+          }
+
+          @Composable
+          private fun StatCard(label: String, value: String, icon: ImageVector, color: Color, modifier: Modifier) {
+              Column(modifier.clip(RoundedCornerShape(16.dp)).background(Surface1).padding(16.dp)) {
+                  Box(Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(color.copy(alpha = 0.18f)), contentAlignment = Alignment.Center) {
+                      Icon(icon, null, tint = color, modifier = Modifier.size(20.dp))
+                  }
+                  Spacer(Modifier.height(10.dp))
+                  Text(value, style = MaterialTheme.typography.headlineMedium, maxLines = 1)
+                  Text(label, color = TextMuted, style = MaterialTheme.typography.bodySmall)
+              }
+          }
+
+          @Composable
+          private fun SettingRow(
+              icon: ImageVector,
+              title: String,
+              value: String?,
+              tint: Color = Indigo,
+              onClick: (() -> Unit)? = null,
+          ) {
+              Row(
+                  Modifier
+                      .fillMaxWidth()
+                      .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+                      .padding(16.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+              ) {
+                  Icon(icon, null, tint = tint, modifier = Modifier.size(22.dp))
+                  Spacer(Modifier.width(14.dp))
+                  Text(title, modifier = Modifier.weight(1f), color = if (tint == Red) Red else MaterialTheme.colorScheme.onSurface)
+                  if (value != null) Text(
+                      value, color = TextMuted, style = MaterialTheme.typography.bodySmall, maxLines = 1,
+                      overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                      modifier = Modifier.padding(start = 12.dp).widthIn(max = 200.dp),
+                  )
+                  if (onClick != null && value == null) Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = TextMuted)
+              }
+          }
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/java/com/feynos/seerr/ui/screens'
+          cat > 'app/src/main/java/com/feynos/seerr/ui/screens/RequestsScreen.kt' <<'FEYNOS_EOF'
+          package com.feynos.seerr.ui.screens
+
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.PaddingValues
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.statusBarsPadding
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.LazyRow
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.lazy.rememberLazyListState
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.Check
+          import androidx.compose.material.icons.filled.Close
+          import androidx.compose.material.icons.filled.CloudOff
+          import androidx.compose.material.icons.filled.Delete
+          import androidx.compose.material.icons.filled.Inbox
+          import androidx.compose.material3.AlertDialog
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.ButtonDefaults
+          import androidx.compose.material3.CircularProgressIndicator
+          import androidx.compose.material3.ExperimentalMaterial3Api
+          import androidx.compose.material3.FilterChip
+          import androidx.compose.material3.FilterChipDefaults
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.IconButton
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.OutlinedButton
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TextButton
+          import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.derivedStateOf
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableIntStateOf
+          import androidx.compose.runtime.mutableStateListOf
+          import androidx.compose.runtime.mutableStateMapOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.rememberCoroutineScope
+          import androidx.compose.runtime.saveable.rememberSaveable
+          import androidx.compose.runtime.setValue
+          import androidx.compose.runtime.snapshotFlow
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.alpha
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import coil.compose.AsyncImage
+          import com.feynos.seerr.LocalApi
+          import com.feynos.seerr.LocalSnackbar
+          import com.feynos.seerr.data.Details
+          import com.feynos.seerr.data.RequestItem
+          import com.feynos.seerr.data.RequestStatus
+          import com.feynos.seerr.data.User
+          import com.feynos.seerr.data.tmdbImage
+          import com.feynos.seerr.ui.components.Avatar
+          import com.feynos.seerr.ui.components.Badge
+          import com.feynos.seerr.ui.components.MessageState
+          import com.feynos.seerr.ui.components.ShimmerBox
+          import com.feynos.seerr.ui.components.TypePill
+          import com.feynos.seerr.ui.components.relativeTime
+          import com.feynos.seerr.ui.components.requestStatusStyle
+          import com.feynos.seerr.ui.theme.Green
+          import com.feynos.seerr.ui.theme.Indigo
+          import com.feynos.seerr.ui.theme.Red
+          import com.feynos.seerr.ui.theme.Surface1
+          import com.feynos.seerr.ui.theme.Surface2
+          import com.feynos.seerr.ui.theme.TextMuted
+          import kotlinx.coroutines.flow.distinctUntilChanged
+          import kotlinx.coroutines.flow.filter
+          import kotlinx.coroutines.launch
+
+          private val filters = listOf(
+              "all" to "All", "pending" to "Pending", "approved" to "Approved",
+              "processing" to "Processing", "available" to "Available", "declined" to "Declined",
+          )
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun RequestsScreen(onOpen: (String, Int) -> Unit) {
+              val api = LocalApi.current
+              val snackbar = LocalSnackbar.current
+              val scope = rememberCoroutineScope()
+
+              var filter by rememberSaveable { mutableStateOf("all") }
+              var me by remember { mutableStateOf<User?>(null) }
+              val items = remember { mutableStateListOf<RequestItem>() }
+              val details = remember { mutableStateMapOf<String, Details>() }
+              var total by remember { mutableIntStateOf(Int.MAX_VALUE) }
+              var loading by remember { mutableStateOf(false) }
+              var refreshing by remember { mutableStateOf(false) }
+              var error by remember { mutableStateOf<String?>(null) }
+              var gen by remember { mutableIntStateOf(0) }
+              var confirmDelete by remember { mutableStateOf<RequestItem?>(null) }
+              val busy = remember { mutableStateMapOf<Int, Boolean>() }
+              val listState = rememberLazyListState()
+
+              fun loadDetails(list: List<RequestItem>) {
+                  list.forEach { r ->
+                      val key = "${r.type}/${r.tmdbId}"
+                      if (details[key] == null) scope.launch {
+                          runCatching { api.details(r.type, r.tmdbId) }.getOrNull()?.let { details[key] = it }
+                      }
+                  }
+              }
+
+              suspend fun loadMore(reset: Boolean = false) {
+                  if (loading && !reset) return
+                  if (reset) { items.clear(); total = Int.MAX_VALUE }
+                  if (items.size >= total) return
+                  val myGen = gen
+                  loading = true
+                  error = null
+                  try {
+                      if (me == null) me = api.me()
+                      val page = api.requests(filter, items.size)
+                      if (myGen != gen) return
+                      items.addAll(page.items.filter { n -> items.none { it.id == n.id } })
+                      total = if (page.items.isEmpty()) items.size else page.total
+                      loadDetails(page.items)
+                  } catch (e: Exception) {
+                      if (myGen == gen) error = e.message ?: "Couldn't load requests"
+                  } finally {
+                      if (myGen == gen) loading = false
+                  }
+              }
+
+              LaunchedEffect(filter) { gen++; loading = false; loadMore(reset = true) }
+
+              val nearEnd by remember {
+                  derivedStateOf {
+                      val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                      last >= listState.layoutInfo.totalItemsCount - 4
+                  }
+              }
+              LaunchedEffect(Unit) {
+                  snapshotFlow { nearEnd }.distinctUntilChanged().filter { it }.collect { if (items.isNotEmpty()) loadMore() }
+              }
+
+              fun act(r: RequestItem, label: String, block: suspend () -> Unit) {
+                  busy[r.id] = true
+                  scope.launch {
+                      try {
+                          block()
+                          snackbar.showSnackbar(label)
+                          gen++
+                          loading = false
+                          loadMore(reset = true)
+                      } catch (e: Exception) {
+                          snackbar.showSnackbar(e.message ?: "Action failed")
+                      } finally {
+                          busy.remove(r.id)
+                      }
+                  }
+              }
+
+              Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                  Text(
+                      "Requests",
+                      style = MaterialTheme.typography.headlineMedium,
+                      modifier = Modifier.padding(start = 20.dp, top = 16.dp, bottom = 8.dp),
+                  )
+                  LazyRow(
+                      contentPadding = PaddingValues(horizontal = 16.dp),
+                      horizontalArrangement = Arrangement.spacedBy(8.dp),
+                  ) {
+                      items(filters) { (key, label) ->
+                          FilterChip(
+                              selected = filter == key,
+                              onClick = { filter = key },
+                              label = { Text(label) },
+                              shape = RoundedCornerShape(50),
+                              colors = FilterChipDefaults.filterChipColors(
+                                  selectedContainerColor = Indigo,
+                                  selectedLabelColor = Color.White,
+                                  containerColor = Surface2,
+                                  labelColor = TextMuted,
+                              ),
+                              border = null,
+                          )
+                      }
+                  }
+                  Spacer(Modifier.height(8.dp))
+
+                  PullToRefreshBox(
+                      isRefreshing = refreshing,
+                      onRefresh = {
+                          scope.launch {
+                              refreshing = true
+                              gen++; loading = false
+                              loadMore(reset = true)
+                              refreshing = false
+                          }
+                      },
+                      modifier = Modifier.fillMaxSize(),
+                  ) {
+                      LazyColumn(
+                          state = listState,
+                          contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                          verticalArrangement = Arrangement.spacedBy(12.dp),
+                          modifier = Modifier.fillMaxSize(),
+                      ) {
+                          items(items, key = { it.id }) { r ->
+                              val d = details["${r.type}/${r.tmdbId}"]
+                              val user = me
+                              RequestCard(
+                                  r, d,
+                                  canManage = user?.canManage == true,
+                                  isMine = user?.id == r.requestedById,
+                                  busy = busy[r.id] == true,
+                                  avatarUrl = api.absoluteUrl(r.requestedByAvatar),
+                                  onOpen = { onOpen(r.type, r.tmdbId) },
+                                  onApprove = { act(r, "Approved") { api.approve(r.id) } },
+                                  onDecline = { act(r, "Declined") { api.decline(r.id) } },
+                                  onDelete = { confirmDelete = r },
+                              )
+                          }
+                          if (items.isEmpty() && loading) {
+                              items(5) { ShimmerBox(Modifier.fillMaxWidth().height(132.dp).clip(RoundedCornerShape(16.dp))) }
+                          }
+                          if (items.isEmpty() && !loading && error == null) {
+                              item {
+                                  MessageState(
+                                      Icons.Filled.Inbox, "No requests",
+                                      if (filter == "all") "Find something on Discover and tap Request." else "Nothing in this filter.",
+                                  )
+                              }
+                          }
+                          if (error != null) {
+                              item {
+                                  MessageState(Icons.Filled.CloudOff, "Couldn't load requests", error, "Retry", {
+                                      scope.launch { gen++; loading = false; loadMore(reset = items.isEmpty()) }
+                                  })
+                              }
+                          }
+                          if (items.isNotEmpty() && loading) {
+                              item {
+                                  Box(Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
+                                      CircularProgressIndicator(color = Indigo)
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+
+              confirmDelete?.let { r ->
+                  val title = details["${r.type}/${r.tmdbId}"]?.title ?: "this request"
+                  AlertDialog(
+                      onDismissRequest = { confirmDelete = null },
+                      containerColor = Surface1,
+                      title = { Text("Delete request?") },
+                      text = { Text("Remove the request for $title.") },
+                      confirmButton = {
+                          TextButton(onClick = {
+                              confirmDelete = null
+                              act(r, "Request deleted") { api.deleteRequest(r.id) }
+                          }) { Text("Delete", color = Red) }
+                      },
+                      dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel") } },
+                  )
+              }
+          }
+
+          @Composable
+          private fun RequestCard(
+              r: RequestItem,
+              d: Details?,
+              canManage: Boolean,
+              isMine: Boolean,
+              busy: Boolean,
+              avatarUrl: String?,
+              onOpen: () -> Unit,
+              onApprove: () -> Unit,
+              onDecline: () -> Unit,
+              onDelete: () -> Unit,
+          ) {
+              Box(
+                  Modifier
+                      .fillMaxWidth()
+                      .clip(RoundedCornerShape(16.dp))
+                      .background(Surface1)
+                      .clickable(onClick = onOpen)
+              ) {
+                  if (d?.backdropPath != null) {
+                      AsyncImage(
+                          tmdbImage(d.backdropPath, "w780"), null,
+                          Modifier.matchParentSize().alpha(0.22f),
+                          contentScale = ContentScale.Crop,
+                      )
+                      Box(
+                          Modifier.matchParentSize().background(
+                              Brush.horizontalGradient(listOf(Surface1, Surface1.copy(alpha = 0.6f)))
+                          )
+                      )
+                  }
+                  Row(Modifier.padding(12.dp)) {
+                      Box(Modifier.width(72.dp).height(108.dp).clip(RoundedCornerShape(10.dp)).background(Surface2)) {
+                          if (d != null) AsyncImage(tmdbImage(d.posterPath, "w185"), d.title, Modifier.matchParentSize(), contentScale = ContentScale.Crop)
+                      }
+                      Spacer(Modifier.width(12.dp))
+                      Column(Modifier.weight(1f)) {
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              TypePill(r.type)
+                              if (r.is4k) {
+                                  Spacer(Modifier.width(6.dp))
+                                  Text("4K", style = MaterialTheme.typography.labelSmall, color = Color.White,
+                                      modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(Color(0xFF0EA5E9)).padding(horizontal = 6.dp, vertical = 2.dp))
+                              }
+                              if (d?.year?.isNotBlank() == true) {
+                                  Spacer(Modifier.width(8.dp))
+                                  Text(d.year, color = TextMuted, style = MaterialTheme.typography.labelMedium)
+                              }
+                              Spacer(Modifier.weight(1f))
+                              if (isMine || canManage) {
+                                  IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
+                                      Icon(Icons.Filled.Delete, "Delete", tint = TextMuted, modifier = Modifier.size(18.dp))
+                                  }
+                              }
+                          }
+                          Spacer(Modifier.height(4.dp))
+                          if (d != null) {
+                              Text(d.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                          } else {
+                              ShimmerBox(Modifier.width(140.dp).height(18.dp).clip(RoundedCornerShape(4.dp)))
+                          }
+                          if (r.type == "tv" && r.seasons.isNotEmpty()) {
+                              Text(
+                                  "Season" + (if (r.seasons.size > 1) "s " else " ") + r.seasons.sorted().joinToString(", "),
+                                  color = TextMuted, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                              )
+                          }
+                          Spacer(Modifier.height(6.dp))
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              Avatar(avatarUrl, r.requestedBy, 20.dp)
+                              Spacer(Modifier.width(6.dp))
+                              Text(
+                                  "${r.requestedBy} • ${relativeTime(r.createdAt)}",
+                                  color = TextMuted, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                              )
+                          }
+                          Spacer(Modifier.height(8.dp))
+                          Badge(requestStatusStyle(r.status, r.mediaStatus))
+                          if (canManage && r.status == RequestStatus.PENDING) {
+                              Spacer(Modifier.height(10.dp))
+                              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                  Button(
+                                      onClick = onApprove,
+                                      enabled = !busy,
+                                      colors = ButtonDefaults.buttonColors(containerColor = Green),
+                                      shape = RoundedCornerShape(10.dp),
+                                      contentPadding = PaddingValues(horizontal = 14.dp),
+                                      modifier = Modifier.height(36.dp),
+                                  ) {
+                                      Icon(Icons.Filled.Check, null, Modifier.size(16.dp))
+                                      Spacer(Modifier.width(4.dp))
+                                      Text("Approve")
+                                  }
+                                  OutlinedButton(
+                                      onClick = onDecline,
+                                      enabled = !busy,
+                                      shape = RoundedCornerShape(10.dp),
+                                      contentPadding = PaddingValues(horizontal = 14.dp),
+                                      colors = ButtonDefaults.outlinedButtonColors(contentColor = Red),
+                                      modifier = Modifier.height(36.dp),
+                                  ) {
+                                      Icon(Icons.Filled.Close, null, Modifier.size(16.dp))
+                                      Spacer(Modifier.width(4.dp))
+                                      Text("Decline")
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/java/com/feynos/seerr/ui/theme'
+          cat > 'app/src/main/java/com/feynos/seerr/ui/theme/Theme.kt' <<'FEYNOS_EOF'
+          package com.feynos.seerr.ui.theme
+
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.Typography
+          import androidx.compose.material3.darkColorScheme
+          import androidx.compose.runtime.Composable
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.text.TextStyle
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.unit.sp
+
+          val Indigo = Color(0xFF6366F1)
+          val IndigoDark = Color(0xFF4F46E5)
+          val Purple = Color(0xFFA855F7)
+          val Night = Color(0xFF0B0F19)
+          val Surface1 = Color(0xFF111827)
+          val Surface2 = Color(0xFF1F2937)
+          val Surface3 = Color(0xFF374151)
+          val TextPrimary = Color(0xFFF3F4F6)
+          val TextMuted = Color(0xFF9CA3AF)
+
+          val Green = Color(0xFF22C55E)
+          val Yellow = Color(0xFFEAB308)
+          val Blue = Color(0xFF3B82F6)
+          val Red = Color(0xFFEF4444)
+
+          val BrandGradient = Brush.linearGradient(listOf(IndigoDark, Purple))
+
+          private val Colors = darkColorScheme(
+              primary = Indigo,
+              onPrimary = Color.White,
+              primaryContainer = IndigoDark,
+              onPrimaryContainer = Color.White,
+              secondary = Purple,
+              onSecondary = Color.White,
+              background = Night,
+              onBackground = TextPrimary,
+              surface = Night,
+              onSurface = TextPrimary,
+              surfaceVariant = Surface2,
+              onSurfaceVariant = TextMuted,
+              surfaceContainer = Surface1,
+              surfaceContainerLow = Surface1,
+              surfaceContainerHigh = Surface2,
+              surfaceContainerHighest = Surface3,
+              outline = Surface3,
+              error = Red,
+          )
+
+          private val Type = Typography(
+              headlineLarge = TextStyle(fontWeight = FontWeight.ExtraBold, fontSize = 30.sp, lineHeight = 36.sp),
+              headlineMedium = TextStyle(fontWeight = FontWeight.Bold, fontSize = 24.sp, lineHeight = 30.sp),
+              titleLarge = TextStyle(fontWeight = FontWeight.Bold, fontSize = 20.sp, lineHeight = 26.sp),
+              titleMedium = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 16.sp, lineHeight = 22.sp),
+              titleSmall = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 14.sp, lineHeight = 18.sp),
+              bodyLarge = TextStyle(fontSize = 16.sp, lineHeight = 24.sp),
+              bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 20.sp),
+              bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 16.sp),
+              labelLarge = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 14.sp),
+              labelMedium = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 12.sp),
+              labelSmall = TextStyle(fontWeight = FontWeight.Bold, fontSize = 10.sp, letterSpacing = 0.4.sp),
+          )
+
+          @Composable
+          fun SeerrTheme(content: @Composable () -> Unit) {
+              MaterialTheme(colorScheme = Colors, typography = Type, content = content)
+          }
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/res/drawable'
+          cat > 'app/src/main/res/drawable/ic_launcher_foreground.xml' <<'FEYNOS_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#FFFFFF"
+                  android:pathData="M26,54 C37,35 71,35 82,54 C71,73 37,73 26,54 Z" />
+              <path android:fillColor="#4F46E5"
+                  android:pathData="M42,54 a12,12 0 1,0 24,0 a12,12 0 1,0 -24,0 Z" />
+              <path android:fillColor="#A855F7"
+                  android:pathData="M47,54 a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0 Z" />
+              <path android:fillColor="#FFFFFF"
+                  android:pathData="M55,49 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0 Z" />
+          </vector>
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/res/mipmap-anydpi-v26'
+          cat > 'app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml' <<'FEYNOS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_bg" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+              <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+          </adaptive-icon>
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/res/values'
+          cat > 'app/src/main/res/values/themes.xml' <<'FEYNOS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_bg">#4F46E5</color>
+              <color name="window_bg">#0B0F19</color>
+              <style name="Theme.FeynosSeerr" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">@color/window_bg</item>
+                  <item name="android:statusBarColor">@android:color/transparent</item>
+                  <item name="android:navigationBarColor">@android:color/transparent</item>
+              </style>
+          </resources>
+          FEYNOS_EOF
+          mkdir -p 'app/src/main/res/xml'
+          cat > 'app/src/main/res/xml/network_security_config.xml' <<'FEYNOS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <network-security-config>
+              <base-config cleartextTrafficPermitted="true">
+                  <trust-anchors>
+                      <certificates src="system" />
+                      <certificates src="user" />
+                  </trust-anchors>
+              </base-config>
+          </network-security-config>
+          FEYNOS_EOF
+          cat > 'build.gradle.kts' <<'FEYNOS_EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
+          }
+          FEYNOS_EOF
+          cat > 'gradle.properties' <<'FEYNOS_EOF'
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          FEYNOS_EOF
+          cat > 'settings.gradle.kts' <<'FEYNOS_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "FeynosSeerr"
+          include(":app")
+          FEYNOS_EOF
+          echo "Generated $(find . -type f | wc -l) files"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      - name: Restore fallback signing key
+        id: kscache
+        uses: actions/cache@v4
+        with:
+          path: ~/.feynos-keystore
+          key: feynos-seerr-keystore-v1
+
+      - name: Prepare signing key
+        shell: bash
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KS_KEYPASS: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            {
+              echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks"
+              echo "KEYSTORE_PASSWORD=$KS_PASS"
+              echo "KEY_ALIAS=$KS_ALIAS"
+              echo "KEY_PASSWORD=${KS_KEYPASS:-$KS_PASS}"
+            } >> "$GITHUB_ENV"
+          else
+            mkdir -p ~/.feynos-keystore
+            if [ ! -f ~/.feynos-keystore/release.jks ]; then
+              keytool -genkeypair -v -keystore ~/.feynos-keystore/release.jks -storetype JKS \
+                -alias feynos -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass feynosseerr -keypass feynosseerr \
+                -dname "CN=Feynos Seerr, O=Feynos, C=US"
+            fi
+            {
+              echo "KEYSTORE_PATH=$HOME/.feynos-keystore/release.jks"
+              echo "KEYSTORE_PASSWORD=feynosseerr"
+              echo "KEY_ALIAS=feynos"
+              echo "KEY_PASSWORD=feynosseerr"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Build release APK
+        working-directory: project
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
+
+      - name: Summarize build errors
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "^e: |What went wrong|Could not|error:" -A2 project/build.log | head -80 | while IFS= read -r line; do
+            echo "::error::${line//%/%25}"
+          done
+
+      - name: Rename APK
+        run: |
+          mkdir -p dist
+          cp project/app/build/outputs/apk/release/app-release.apk "dist/FeynosSeerr-${VERSION_NAME}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FeynosSeerr-${{ env.VERSION_NAME }}
+          path: dist/*.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION_NAME }}
+          name: Feynos Seerr ${{ env.VERSION_NAME }}
+          make_latest: true
+          files: dist/*.apk
+          body: |
+            Android client for Seerr (Overseerr / Jellyseerr).
+            Built from ${{ github.sha }}.
